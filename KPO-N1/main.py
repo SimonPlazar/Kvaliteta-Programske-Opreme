@@ -56,33 +56,71 @@ class SimulacijaNit(threading.Thread):
                 if nacin == 'deterministični':
                     # Deterministična logistična enačba: ∆N = (R - S - K*N) * N
                     nova_generacija = []
-                    p_smrt = min(1.0, s + k * n)
-                    p_rojstvo = r * (1.0 - p_smrt)
+                    delta = int((r - s - k * n) * n)
 
+                    # obstoječi agenti preživijo (lahko dodaš pogoje)
                     for agent in self.agenti:
                         agent.premakni(450, 450)
-                        roll = random.random()
+                        nova_generacija.append(agent)
 
-                        if roll < p_smrt:
-                            pass  # umre
-                        elif roll < p_smrt + p_rojstvo:
-                            nova_generacija.append(agent)  # preživi
-                            nova_generacija.append(Agent(agent.x, agent.y))  # + potomec
-                        else:
-                            nova_generacija.append(agent)  # samo preživi
+                    # dodamo nove agente če je delta pozitivna
+                    if delta > 0:
+                        for _ in range(delta):
+                            nova_generacija.append(Agent(random.randint(50, 400), random.randint(50, 400)))
+
+                    # če je delta negativen → populacija se zmanjša
+                    elif delta < 0:
+                        nova_generacija = nova_generacija[:delta]  # odstrani nekaj agentov
 
                     self.agenti = nova_generacija
+
+                    # nova_generacija = []
+                    # p_smrt = min(1.0, s + k * n)
+                    # p_rojstvo = r * (1.0 - p_smrt)
+                    #
+                    # for agent in self.agenti:
+                    #     agent.premakni(450, 450)
+                    #     roll = random.random()
+                    #
+                    #     if roll < p_smrt:
+                    #         pass  # umre
+                    #     elif roll < p_smrt + p_rojstvo:
+                    #         nova_generacija.append(agent)  # preživi
+                    #         nova_generacija.append(Agent(agent.x, agent.y))  # + potomec
+                    #     else:
+                    #         nova_generacija.append(agent)  # samo preživi
+                    #
+                    # self.agenti = nova_generacija
                 else:
                     # Stohastični način (originalni)
                     nova_generacija = []
                     for agent in self.agenti:
                         agent.premakni(450, 450)
+                        # prilagojena smrtnost
+                        verjetnost_smrti = s + k * n
+
+                        # preveri razmnoževanje
                         if random.random() < r:
-                            nova_generacija.append(Agent(agent.x, agent.y))
-                        p_smrt = s + (k * n)
-                        if random.random() >= p_smrt:
-                            nova_generacija.append(agent)
+                            nova_generacija.append(Agent(random.randint(50, 400), random.randint(50, 400)))
+
+                        # preveri ali agent umre
+                        if random.random() < verjetnost_smrti:
+                            continue  # agent umre
+
+                        # agent preživi
+                        nova_generacija.append(agent)
+
                     self.agenti = nova_generacija
+
+                    # nova_generacija = []
+                    # for agent in self.agenti:
+                    #     agent.premakni(450, 450)
+                    #     if random.random() < r:
+                    #         nova_generacija.append(Agent(agent.x, agent.y))
+                    #     p_smrt = s + (k * n)
+                    #     if random.random() >= p_smrt:
+                    #         nova_generacija.append(agent)
+                    # self.agenti = nova_generacija
 
                 pozicije_za_izris = [(a.x, a.y) for a in self.agenti[:1000]]
 
