@@ -166,8 +166,15 @@ class AgentVrstica:
         self.ent_k = self._entry("K:", "0.0005")
 
         if not is_first:
-            tk.Button(self.frame, text="✕", fg="red", command=on_delete_cb,
-                      relief=tk.FLAT, font=("Arial", 9, "bold")).pack(side=tk.RIGHT, padx=3)
+            self.btn_delete = tk.Button(self.frame, text="✕", fg="red", command=on_delete_cb,
+                                        relief=tk.FLAT, font=("Arial", 9, "bold"))
+            self.btn_delete.pack(side=tk.RIGHT, padx=3)
+        else:
+            self.btn_delete = None
+
+    def nastavi_brisanje(self, omogoceno: bool):
+        if self.btn_delete is not None:
+            self.btn_delete.config(state=tk.NORMAL if omogoceno else tk.DISABLED)
 
     def _entry(self, label, default):
         tk.Label(self.frame, text=label, font=("Arial", 8)).pack(side=tk.LEFT, padx=(4, 1))
@@ -397,6 +404,8 @@ class GlavnoOkno(tk.Tk):
             self.btn_nastavi.config(state=tk.DISABLED)
             self.rb_stohastični.config(state=tk.DISABLED)
             self.rb_deterministični.config(state=tk.DISABLED)
+            for vrstica in self.agent_vrstice:
+                vrstica.nastavi_brisanje(False)
             self._osvezi_prikaz()
             self.after(self._graf_interval_ms, self._osvezi_graf)
 
@@ -441,6 +450,8 @@ class GlavnoOkno(tk.Tk):
         self.btn_nastavi.config(state=tk.DISABLED)
         self.rb_stohastični.config(state=tk.NORMAL)
         self.rb_deterministični.config(state=tk.NORMAL)
+        for vrstica in self.agent_vrstice:
+            vrstica.nastavi_brisanje(True)
 
     def _nastavi_speed(self):
         try:
