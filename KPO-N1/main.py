@@ -173,6 +173,11 @@ class GlavnoOkno(tk.Tk):
         self._resetiran = False  # zastavica za preprečitev izrisa po restartu
         self.nacin_simulacije = tk.StringVar(value="stohastični")
 
+        # Ločen interval za graf (redkejše osveževanje)
+        self._graf_interval_ms = 500  # osveži graf vsakih 500ms
+        # Sledenje canvas line ID-jem za vsak agent {aid: [line_id, ...]}
+        self._graf_linije: dict[int, list] = {}
+
         self._ustvari_vmesnik()
 
     # ------------------------------------------------------------------ #
@@ -229,11 +234,18 @@ class GlavnoOkno(tk.Tk):
                                                  variable=self.nacin_simulacije, value="deterministični")
         self.rb_deterministični.pack(side=tk.LEFT)
 
-        # Globalno osveževanje
-        tk.Label(buttons_frame, text="Osveževanje (s):").pack(side=tk.LEFT, padx=(15, 2))
+        # Globalno osveževanje simulacije
+        tk.Label(buttons_frame, text="Sim (s):").pack(side=tk.LEFT, padx=(15, 2))
         self.ent_speed = tk.Entry(buttons_frame, width=6)
         self.ent_speed.insert(0, "0.1")
         self.ent_speed.pack(side=tk.LEFT)
+
+        # Osveževanje grafa
+        tk.Label(buttons_frame, text="Graf (s):").pack(side=tk.LEFT, padx=(8, 2))
+        self.ent_graf_speed = tk.Entry(buttons_frame, width=6)
+        self.ent_graf_speed.insert(0, "0.5")
+        self.ent_graf_speed.pack(side=tk.LEFT)
+
         self.btn_nastavi = tk.Button(buttons_frame, text="Nastavi", command=self._nastavi_speed, state=tk.DISABLED)
         self.btn_nastavi.pack(side=tk.LEFT, padx=3)
 
@@ -316,6 +328,11 @@ class GlavnoOkno(tk.Tk):
         except ValueError:
             speed = 0.1
 
+        try:
+            self._graf_interval_ms = max(100, int(float(self.ent_graf_speed.get()) * 1000))
+        except ValueError:
+            self._graf_interval_ms = 500
+
         nacin = self.nacin_simulacije.get()
 
         for vrstica in self.agent_vrstice:
@@ -343,6 +360,7 @@ class GlavnoOkno(tk.Tk):
             self.rb_stohastični.config(state=tk.DISABLED)
             self.rb_deterministični.config(state=tk.DISABLED)
             self._osvezi_prikaz()
+            self.after(self._graf_interval_ms, self._osvezi_graf)
 
     def _toggle_pause_vse(self):
         any_paused = any(n.paused for n in self.sim_niti.values())
@@ -374,6 +392,7 @@ class GlavnoOkno(tk.Tk):
 
         self.canvas_sim.delete("all")
         self.canvas_graf.delete("pot", "hover", "legenda")
+        self._graf_linije.clear()
         self._narisi_osi()
         self.lbl_info.config(text="Skupna populacija: 0")
 
@@ -389,10 +408,16 @@ class GlavnoOkno(tk.Tk):
         try:
             speed = float(self.ent_speed.get())
         except ValueError:
-            return
-        # Posodobimo speed na vseh aktivnih nitih
-        for nit in self.sim_niti.values():
-            nit.params['speed'] = speed
+            speed = None
+        if speed is not None:
+            for nit in self.sim_niti.values():
+                nit.params['speed'] = speed
+
+        try:
+            graf_speed = float(self.ent_graf_speed.get())
+            self._graf_interval_ms = max(100, int(graf_speed * 1000))
+        except ValueError:
+            pass
 
     # ------------------------------------------------------------------ #
     #  Prikaz
@@ -432,8 +457,7 @@ class GlavnoOkno(tk.Tk):
 
         if novi_podatki_prisli:
             self._posodobi_skupno_populacijo()
-            self._izris_grafa()
-            self._osvezi_hover_vizualizacijo()
+            # Graf in hover se osvežujeta v ločenem ciklu (_osvezi_graf)
 
         if any(n.running for n in self.sim_niti.values()):
             try:
@@ -443,6 +467,15 @@ class GlavnoOkno(tk.Tk):
             # UI osveževanje je vsaj 30ms, sicer enako kot simulacijski korak
             interval_ms = max(30, int(speed * 1000))
             self.after(interval_ms, self._osvezi_prikaz)
+
+    def _osvezi_graf(self):
+        """Ločen cikel za osveževanje grafa - neodvisen od simulacije."""
+        if self._resetiran:
+            return
+        self._izris_grafa()
+        self._osvezi_hover_vizualizacijo()
+        if any(n.running for n in self.sim_niti.values()):
+            self.after(self._graf_interval_ms, self._osvezi_graf)
 
     def _posodobi_skupno_populacijo(self):
         skupaj = 0
@@ -462,8 +495,6 @@ class GlavnoOkno(tk.Tk):
         self.canvas_graf.create_text(410, 420, text="t", tags="os")
 
     def _izris_grafa(self):
-        self.canvas_graf.delete("pot", "legenda")
-
         # Globalni min/max za drsno okno x-osi in skupno skalo y-osi
         global_min_t = None
         global_max_t = None
@@ -482,16 +513,23 @@ class GlavnoOkno(tk.Tk):
         if global_max_t is None or global_max_t == global_min_t:
             return
 
-        # Dodaj padding (10%) na y-os, spodnja meja ne gre pod 0
         razpon_n = max(1, global_max_n - global_min_n)
         padding_n = razpon_n * 0.10
         y_min = max(0, global_min_n - padding_n)
         y_max = global_max_n + padding_n
         razpon_y = y_max - y_min
-
         razpon_t = global_max_t - global_min_t
 
         agent_ids = list(self.sim_niti.keys())
+
+        # Briši legendo in odvečne agentove linije
+        self.canvas_graf.delete("legenda")
+        aktivni_aids = set(agent_ids)
+        for aid in list(self._graf_linije.keys()):
+            if aid not in aktivni_aids:
+                for lid in self._graf_linije[aid]:
+                    self.canvas_graf.delete(lid)
+                del self._graf_linije[aid]
 
         for i, aid in enumerate(agent_ids):
             zgodovina = self.zgodovine.get(aid, [])
@@ -499,30 +537,54 @@ class GlavnoOkno(tk.Tk):
                 continue
 
             barva = BARVE[i % len(BARVE)]
-            # Redčenje - vzorči največ MAX_TOCKE_GRAFA točk za izris
+
+            # Redčenje
             if len(zgodovina) > MAX_TOCKE_GRAFA:
                 korak = len(zgodovina) / MAX_TOCKE_GRAFA
                 zgodovina_izris = [zgodovina[int(j * korak)] for j in range(MAX_TOCKE_GRAFA)]
-                # Vedno vključi zadnjo točko
                 if zgodovina_izris[-1] != zgodovina[-1]:
                     zgodovina_izris.append(zgodovina[-1])
             else:
                 zgodovina_izris = zgodovina
-            prejsnja = None
+
+            # Pretvori v canvas koordinate
+            tocke = []
             for t, n in zgodovina_izris:
                 px = self.ox + ((t - global_min_t) / razpon_t) * self.w
                 py = self.oy - ((n - y_min) / razpon_y) * self.h
-                if prejsnja:
-                    self.canvas_graf.create_line(prejsnja[0], prejsnja[1], px, py,
-                                                 fill=barva, width=2, tags="pot")
-                prejsnja = (px, py)
+                tocke.append((px, py))
+
+            potrebnih_crt = len(tocke) - 1
+            obstojecih_crt = len(self._graf_linije.get(aid, []))
+
+            if aid not in self._graf_linije:
+                self._graf_linije[aid] = []
+
+            linije = self._graf_linije[aid]
+
+            # Recikliraj obstoječe linije z coords(), dodaj nove, briši odvečne
+            for j in range(potrebnih_crt):
+                x1, y1 = tocke[j]
+                x2, y2 = tocke[j + 1]
+                if j < obstojecih_crt:
+                    self.canvas_graf.coords(linije[j], x1, y1, x2, y2)
+                else:
+                    lid = self.canvas_graf.create_line(x1, y1, x2, y2,
+                                                       fill=barva, width=2, tags="pot")
+                    linije.append(lid)
+
+            # Briši odvečne linije če je točk zdaj manj (npr. po restartu)
+            for j in range(potrebnih_crt, obstojecih_crt):
+                self.canvas_graf.delete(linije[j])
+            self._graf_linije[aid] = linije[:potrebnih_crt]
 
         # Legenda
         for i, aid in enumerate(agent_ids):
             barva = BARVE[i % len(BARVE)]
             lx = 60 + i * 80
             ly = 20
-            self.canvas_graf.create_rectangle(lx, ly - 6, lx + 16, ly + 6, fill=barva, outline=barva, tags="legenda")
+            self.canvas_graf.create_rectangle(lx, ly - 6, lx + 16, ly + 6,
+                                              fill=barva, outline=barva, tags="legenda")
             self.canvas_graf.create_text(lx + 22, ly, text=f"A{i + 1}", anchor="w",
                                          font=("Arial", 8), tags="legenda")
 
@@ -578,7 +640,6 @@ class GlavnoOkno(tk.Tk):
 
         agent_ids = list(self.sim_niti.keys())
         tekst_vrstice = []
-        offset_y = 0
 
         for i, aid in enumerate(agent_ids):
             zgodovina = self.zgodovine.get(aid, [])
