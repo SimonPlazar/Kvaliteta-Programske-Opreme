@@ -10,6 +10,11 @@ BARVE = ["blue", "red", "green", "orange", "purple", "brown", "teal", "magenta",
 BARVE_ORIS = ["darkblue", "darkred", "darkgreen", "darkorange", "indigo", "saddlebrown", "darkcyan", "darkmagenta",
               "midnightblue", "darkolivegreen"]
 
+# Največje število točk v zgodovini na agenta
+MAX_ZGODOVINA = 200
+# Največje število točk za izris na grafu (redčenje)
+MAX_TOCKE_GRAFA = 400
+
 
 class Agent:
     def __init__(self, x, y):
@@ -86,7 +91,9 @@ class SimulacijaNit(threading.Thread):
                     'cas': casovni_korak,
                     'pozicije': pozicije_za_izris
                 }
-                self.data_queue.put(podatki)
+                # Prepreči kopičenje v vrsti - zavrži stare podatke če UI ne sledi
+                if self.data_queue.qsize() < 50:
+                    self.data_queue.put(podatki)
                 casovni_korak += 1
 
             time.sleep(self.params['speed'])
@@ -399,6 +406,9 @@ class GlavnoOkno(tk.Tk):
                 if aid not in self.zgodovine:
                     self.zgodovine[aid] = []
                 self.zgodovine[aid].append((podatki['cas'], podatki['n']))
+                # Drseče okno - ohrani samo zadnjih MAX_ZGODOVINA točk
+                if len(self.zgodovine[aid]) > MAX_ZGODOVINA:
+                    self.zgodovine[aid] = self.zgodovine[aid][-MAX_ZGODOVINA:]
 
                 # Izris bitij na platnu simulacije
                 tag = f"bitje_{aid}"
@@ -448,16 +458,22 @@ class GlavnoOkno(tk.Tk):
     def _izris_grafa(self):
         self.canvas_graf.delete("pot", "legenda")
 
-        # Globalni max za skupno skalo
-        global_max_t = 0
+        # Globalni min/max za drsno okno x-osi in skupno skalo y-osi
+        global_min_t = None
+        global_max_t = None
         global_max_n = 10
         for zgodovina in self.zgodovine.values():
             if len(zgodovina) >= 2:
-                global_max_t = max(global_max_t, zgodovina[-1][0])
+                t_zac = zgodovina[0][0]
+                t_kon = zgodovina[-1][0]
+                global_min_t = t_zac if global_min_t is None else min(global_min_t, t_zac)
+                global_max_t = t_kon if global_max_t is None else max(global_max_t, t_kon)
                 global_max_n = max(global_max_n, max(p[1] for p in zgodovina))
 
-        if global_max_t <= 0:
+        if global_max_t is None or global_max_t == global_min_t:
             return
+
+        razpon_t = global_max_t - global_min_t
 
         agent_ids = list(self.sim_niti.keys())
 
@@ -467,9 +483,18 @@ class GlavnoOkno(tk.Tk):
                 continue
 
             barva = BARVE[i % len(BARVE)]
+            # Redčenje - vzorči največ MAX_TOCKE_GRAFA točk za izris
+            if len(zgodovina) > MAX_TOCKE_GRAFA:
+                korak = len(zgodovina) / MAX_TOCKE_GRAFA
+                zgodovina_izris = [zgodovina[int(j * korak)] for j in range(MAX_TOCKE_GRAFA)]
+                # Vedno vključi zadnjo točko
+                if zgodovina_izris[-1] != zgodovina[-1]:
+                    zgodovina_izris.append(zgodovina[-1])
+            else:
+                zgodovina_izris = zgodovina
             prejsnja = None
-            for t, n in zgodovina:
-                px = self.ox + (t / global_max_t) * self.w
+            for t, n in zgodovina_izris:
+                px = self.ox + ((t - global_min_t) / razpon_t) * self.w
                 py = self.oy - (n / global_max_n) * self.h
                 if prejsnja:
                     self.canvas_graf.create_line(prejsnja[0], prejsnja[1], px, py,
@@ -504,17 +529,22 @@ class GlavnoOkno(tk.Tk):
         if not (v_coni_x and v_coni_y):
             return
 
-        global_max_t = 0
+        global_min_t = None
+        global_max_t = None
         global_max_n = 10
         for zgodovina in self.zgodovine.values():
             if len(zgodovina) >= 2:
-                global_max_t = max(global_max_t, zgodovina[-1][0])
+                t_zac = zgodovina[0][0]
+                t_kon = zgodovina[-1][0]
+                global_min_t = t_zac if global_min_t is None else min(global_min_t, t_zac)
+                global_max_t = t_kon if global_max_t is None else max(global_max_t, t_kon)
                 global_max_n = max(global_max_n, max(p[1] for p in zgodovina))
 
-        if global_max_t <= 0:
+        if global_max_t is None or global_max_t == global_min_t:
             return
 
-        t_miska = ((self.zadnja_miska_x - self.ox) / self.w) * global_max_t
+        razpon_t = global_max_t - global_min_t
+        t_miska = global_min_t + ((self.zadnja_miska_x - self.ox) / self.w) * razpon_t
 
         # Navpična črta
         self.canvas_graf.create_line(self.zadnja_miska_x, self.oy - self.h,
@@ -533,7 +563,7 @@ class GlavnoOkno(tk.Tk):
             barva = BARVE[i % len(BARVE)]
             najblizja = min(zgodovina, key=lambda p: abs(p[0] - t_miska))
 
-            px = self.ox + (najblizja[0] / global_max_t) * self.w
+            px = self.ox + ((najblizja[0] - global_min_t) / razpon_t) * self.w
             py = self.oy - (najblizja[1] / global_max_n) * self.h
 
             self.canvas_graf.create_oval(px - 4, py - 4, px + 4, py + 4,
