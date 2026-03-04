@@ -38,6 +38,7 @@ class SimulacijaNit(threading.Thread):
         self.running = True
         self.paused = False
         self.daemon = True
+        self.zavrnjeni_koraki = 0
 
         self.agenti = [Agent(random.randint(50, 400), random.randint(50, 400))
                        for _ in range(int(self.params['st']))]
@@ -94,6 +95,11 @@ class SimulacijaNit(threading.Thread):
                 # Prepreči kopičenje v vrsti - zavrži stare podatke če UI ne sledi
                 if self.data_queue.qsize() < 50:
                     self.data_queue.put(podatki)
+                else:
+                    self.zavrnjeni_koraki += 1
+                    print(f"[OPOZORILO] Agent {self.agent_id}: UI zaostaja! "
+                          f"Korak t={casovni_korak} zavržen. "
+                          f"Skupaj zavrnjenih: {self.zavrnjeni_koraki}")
                 casovni_korak += 1
 
             time.sleep(self.params['speed'])
@@ -461,17 +467,27 @@ class GlavnoOkno(tk.Tk):
         # Globalni min/max za drsno okno x-osi in skupno skalo y-osi
         global_min_t = None
         global_max_t = None
-        global_max_n = 10
+        global_min_n = None
+        global_max_n = None
         for zgodovina in self.zgodovine.values():
             if len(zgodovina) >= 2:
                 t_zac = zgodovina[0][0]
                 t_kon = zgodovina[-1][0]
+                vse_n = [p[1] for p in zgodovina]
                 global_min_t = t_zac if global_min_t is None else min(global_min_t, t_zac)
                 global_max_t = t_kon if global_max_t is None else max(global_max_t, t_kon)
-                global_max_n = max(global_max_n, max(p[1] for p in zgodovina))
+                global_min_n = min(vse_n) if global_min_n is None else min(global_min_n, min(vse_n))
+                global_max_n = max(vse_n) if global_max_n is None else max(global_max_n, max(vse_n))
 
         if global_max_t is None or global_max_t == global_min_t:
             return
+
+        # Dodaj padding (10%) na y-os, spodnja meja ne gre pod 0
+        razpon_n = max(1, global_max_n - global_min_n)
+        padding_n = razpon_n * 0.10
+        y_min = max(0, global_min_n - padding_n)
+        y_max = global_max_n + padding_n
+        razpon_y = y_max - y_min
 
         razpon_t = global_max_t - global_min_t
 
@@ -495,7 +511,7 @@ class GlavnoOkno(tk.Tk):
             prejsnja = None
             for t, n in zgodovina_izris:
                 px = self.ox + ((t - global_min_t) / razpon_t) * self.w
-                py = self.oy - (n / global_max_n) * self.h
+                py = self.oy - ((n - y_min) / razpon_y) * self.h
                 if prejsnja:
                     self.canvas_graf.create_line(prejsnja[0], prejsnja[1], px, py,
                                                  fill=barva, width=2, tags="pot")
@@ -531,17 +547,26 @@ class GlavnoOkno(tk.Tk):
 
         global_min_t = None
         global_max_t = None
-        global_max_n = 10
+        global_min_n = None
+        global_max_n = None
         for zgodovina in self.zgodovine.values():
             if len(zgodovina) >= 2:
                 t_zac = zgodovina[0][0]
                 t_kon = zgodovina[-1][0]
+                vse_n = [p[1] for p in zgodovina]
                 global_min_t = t_zac if global_min_t is None else min(global_min_t, t_zac)
                 global_max_t = t_kon if global_max_t is None else max(global_max_t, t_kon)
-                global_max_n = max(global_max_n, max(p[1] for p in zgodovina))
+                global_min_n = min(vse_n) if global_min_n is None else min(global_min_n, min(vse_n))
+                global_max_n = max(vse_n) if global_max_n is None else max(global_max_n, max(vse_n))
 
         if global_max_t is None or global_max_t == global_min_t:
             return
+
+        razpon_n = max(1, global_max_n - global_min_n)
+        padding_n = razpon_n * 0.10
+        y_min = max(0, global_min_n - padding_n)
+        y_max = global_max_n + padding_n
+        razpon_y = y_max - y_min
 
         razpon_t = global_max_t - global_min_t
         t_miska = global_min_t + ((self.zadnja_miska_x - self.ox) / self.w) * razpon_t
@@ -564,7 +589,7 @@ class GlavnoOkno(tk.Tk):
             najblizja = min(zgodovina, key=lambda p: abs(p[0] - t_miska))
 
             px = self.ox + ((najblizja[0] - global_min_t) / razpon_t) * self.w
-            py = self.oy - (najblizja[1] / global_max_n) * self.h
+            py = self.oy - ((najblizja[1] - y_min) / razpon_y) * self.h
 
             self.canvas_graf.create_oval(px - 4, py - 4, px + 4, py + 4,
                                          fill=barva, outline="white", tags="hover")
