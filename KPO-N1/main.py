@@ -5,32 +5,78 @@ import queue
 import time
 import random
 
-# Barvna paleta za različne agente
+# --- KONFIGURACIJA IN KONSTANTE ---
 BARVE = ["blue", "red", "green", "orange", "purple", "brown", "teal", "magenta", "navy", "olive"]
 BARVE_ORIS = ["darkblue", "darkred", "darkgreen", "darkorange", "indigo", "saddlebrown", "darkcyan", "darkmagenta",
               "midnightblue", "darkolivegreen"]
 
-# Največje število točk v zgodovini na agenta
-MAX_ZGODOVINA = 200
-# Največje število točk za izris na grafu (redčenje)
-MAX_TOCKE_GRAFA = 400
+# Agent / simulacija
+AGENT_PREMIK = 10               # Največji korak premika agenta na korak
+AGENT_SPAWN_MIN = 20            # Minimalna koordinata pri ustvarjanju agentov
+AGENT_SPAWN_MAX = 430           # Maksimalna koordinata pri ustvarjanju agentov
+PLATNO_SIM_VELIKOST = 450       # Širina/višina simulacijskega platna (px)
+PLATNO_SIM_MEJA = 10            # Rob, znotraj katerega ostanejo agenti
+QUEUE_MAX = 50                  # Največje število sporočil v vrsti
+POZICIJ_MAX = 1000              # Koliko pozicij agentov pošljemo UI-ju na korak
 
+# Graf
+GRAF_OX = 50                    # X izhodišče grafa
+GRAF_OY = 400                   # Y izhodišče grafa
+GRAF_W = 350                    # Širina grafa (px)
+GRAF_H = 350                    # Višina grafa (px)
+GRAF_OS_X_KONEC = 410           # Konec x osi grafa
+GRAF_OS_Y_KONEC = 40            # Konec y osi grafa (vrh)
+GRAF_LEGENDA_X0 = 55            # X začetek prve legende
+GRAF_LEGENDA_DX = 78            # Razmik med legendami
+GRAF_LEGENDA_Y0 = 14            # Y pozicija prve vrstice legend
+GRAF_LEGENDA_DY = 16            # Razmik med vrsticama legend
+GRAF_LEGENDA_STOLPCI = 5        # Koliko legend na vrstico
+HOVER_FPS_MS = 16               # Interval hover zanke (~60fps)
+HOVER_PIKA_R = 4                # Polmer pike pri hoverju
+HOVER_TOOLTIP_DY = 13           # Razmik vrstic v tooltippu
+MAX_ZGODOVINA = 200             # Največje število točk v zgodovini na agenta
+MAX_TOCKE_GRAFA = 400           # Največje število točk izrisanih na grafu
+
+# UI
+PLATNO_GRAF_VELIKOST = 450      # Širina/višina grafičnega platna (px)
+SEZNAM_AGENTOV_VISINA = 120     # Višina scrollable področja agentov (px)
+PRIVZETA_HITROST_SIM = "0.1"    # Privzeta hitrost simulacije (s)
+PRIVZETA_HITROST_GRAF = "0.5"   # Privzeto osveževanje grafa (s)
+GRAF_OSVEZI_MIN_MS = 50         # Minimalni interval osveževanja grafa (ms)
+GRAF_OSVEZI_FALLBACK_MS = 500   # Fallback interval osveževanja grafa (ms)
+SIM_OSVEZI_MS = 30              # Interval posodabljanja sim platna (ms)
+
+# Privzete vrednosti parametrov agenta
+PRIVZETI_N0 = "50"
+PRIVZETI_R = "0.1"
+PRIVZETI_S = "0.05"
+PRIVZETI_K = "0.0005"
+
+
+# --- 1. DOMENSKI MODELI (MODEL) ---
 
 class Agent:
+    """Predstavlja posamezno bitje v simulaciji."""
+
     def __init__(self, x, y):
         self.x = x
         self.y = y
-        self.move = 10
+        self.move = AGENT_PREMIK
 
     def premakni(self, meja_w, meja_h):
+        """Naključno premikanje znotraj meja platna."""
         self.x += random.uniform(-self.move, self.move)
         self.y += random.uniform(-self.move, self.move)
-        self.x = max(10, min(meja_w - 10, self.x))
-        self.y = max(10, min(meja_h - 10, self.y))
+        self.x = max(PLATNO_SIM_MEJA, min(meja_w - PLATNO_SIM_MEJA, self.x))
+        self.y = max(PLATNO_SIM_MEJA, min(meja_h - PLATNO_SIM_MEJA, self.y))
 
+
+# --- 2. SIMULACIJSKI ENGINE (LOGIKA) ---
 
 class SimulacijaNit(threading.Thread):
-    def __init__(self, data_queue, parametri, agent_id):
+    """Niti za izvajanje matematičnega dela simulacije za določeno populacijo."""
+
+    def __init__(self, data_queue, parametri, agent_id, speed_entry):
         super().__init__()
         self.data_queue = data_queue
         self.params = parametri
@@ -38,649 +84,505 @@ class SimulacijaNit(threading.Thread):
         self.running = True
         self.paused = False
         self.daemon = True
-        self.zavrnjeni_koraki = 0
+        self._speed_entry = speed_entry
 
-        self.agenti = [Agent(random.randint(50, 400), random.randint(50, 400))
+        self.agenti = [Agent(random.randint(AGENT_SPAWN_MIN, AGENT_SPAWN_MAX),
+                             random.randint(AGENT_SPAWN_MIN, AGENT_SPAWN_MAX))
                        for _ in range(int(self.params['st']))]
+
+    def _get_speed(self):
+        try:
+            val = float(self._speed_entry.get())
+            if val > 0:
+                return val
+        except (ValueError, tk.TclError):
+            pass
+        return self.params['speed']
 
     def run(self):
         casovni_korak = 0
         while self.running:
             if not self.paused:
-                r = self.params['r']
-                s = self.params['s']
-                k = self.params['k']
-                n = len(self.agenti)
-                nacin = self.params.get('nacin', 'stohastični')
-
-                if nacin == 'deterministični':
-                    # ΔN = (R - S - K*N) * N
-                    delta = int(round((r - s - k * n) * n))
-
-                    # Update positions for existing agents
-                    for agent in self.agenti:
-                        agent.premakni(450, 450)
-
-                    if delta > 0:
-                        # Add new creatures at random locations
-                        for _ in range(delta):
-                            self.agenti.append(Agent(random.randint(50, 400), random.randint(50, 400)))
-                    elif delta < 0:
-                        # Remove |delta| creatures randomly
-                        num_to_remove = min(abs(delta), len(self.agenti))
-                        for _ in range(num_to_remove):
-                            if self.agenti:
-                                self.agenti.pop(random.randrange(len(self.agenti)))
-
-                else:
-                    # Stohastični način
-                    nova_populacija = []
-
-                    # Verjetnost smrti se povečuje z N zaradi faktorja K
-                    # Dejanska smrtnost = s + k*n
-                    verjetnost_smrti = s + (k * n)
-
-                    for agent in self.agenti:
-                        agent.premakni(450, 450)
-
-                        # 1. Ali bitje preživi?
-                        if random.random() >= verjetnost_smrti:
-                            nova_populacija.append(agent)
-
-                        # 2. Ali se bitje razmnoži? (neodvisen dogodek)
-                        if random.random() < r:
-                            nova_populacija.append(Agent(random.randint(20, 430), random.randint(20, 430)))
-
-                    self.agenti = nova_populacija
-
-                pozicije_za_izris = [(a.x, a.y) for a in self.agenti[:1000]]
-                podatki = {
-                    'agent_id': self.agent_id,
-                    'n': len(self.agenti),
-                    'cas': casovni_korak,
-                    'pozicije': pozicije_za_izris
-                }
-
-                if self.data_queue.qsize() < 50:
-                    self.data_queue.put(podatki)
+                self._evolucija()
+                self._poslji_podatke(casovni_korak)
                 casovni_korak += 1
+            time.sleep(self._get_speed())
 
-            time.sleep(self.params['speed'])
+    def _evolucija(self):
+        """Izvede en korak rasti populacije (deterministično ali stohastično)."""
+        r, s, k = self.params['r'], self.params['s'], self.params['k']
+        n = len(self.agenti)
+        nacin = self.params.get('nacin', 'stohastični')
+
+        if nacin == 'deterministični':
+            delta = int(round((r - s - k * n) * n))
+            for agent in self.agenti:
+                agent.premakni(PLATNO_SIM_VELIKOST, PLATNO_SIM_VELIKOST)
+
+            if delta > 0:
+                for _ in range(delta):
+                    self.agenti.append(Agent(random.randint(AGENT_SPAWN_MIN, AGENT_SPAWN_MAX),
+                                             random.randint(AGENT_SPAWN_MIN, AGENT_SPAWN_MAX)))
+            elif delta < 0:
+                for _ in range(min(abs(delta), len(self.agenti))):
+                    if self.agenti: self.agenti.pop(random.randrange(len(self.agenti)))
+        else:
+            nova_populacija = []
+            verjetnost_smrti = s + (k * n)
+            for agent in self.agenti:
+                agent.premakni(PLATNO_SIM_VELIKOST, PLATNO_SIM_VELIKOST)
+                if random.random() >= verjetnost_smrti:
+                    nova_populacija.append(agent)
+                if random.random() < r:
+                    nova_populacija.append(Agent(random.randint(AGENT_SPAWN_MIN, AGENT_SPAWN_MAX),
+                                                 random.randint(AGENT_SPAWN_MIN, AGENT_SPAWN_MAX)))
+            self.agenti = nova_populacija
+
+    def _poslji_podatke(self, korak):
+        """Pripravi podatke za glavno UI nit."""
+        podatki = {
+            'agent_id': self.agent_id,
+            'n': len(self.agenti),
+            'cas': korak,
+            'pozicije': [(a.x, a.y) for a in self.agenti[:POZICIJ_MAX]]
+        }
+        if self.data_queue.qsize() < QUEUE_MAX:
+            self.data_queue.put(podatki)
 
     def stop(self):
         self.running = False
 
 
-class AgentVrstica:
-    """Predstavlja eno vrstico parametrov za enega agenta v UI."""
+# --- 3. UI KOMPONENTE (VIEW) ---
 
-    def __init__(self, parent_frame, idx, barva, on_delete_cb, is_first=False):
-        self.idx = idx
-        self.barva = barva
-        self.frame = tk.Frame(parent_frame, bd=1, relief=tk.GROOVE, pady=2)
-        self.frame.pack(fill=tk.X, pady=1)
+class AgentVrstica(tk.Frame):
+    """UI komponenta za vnos parametrov posameznega tipa agenta."""
 
-        # Barvni indikator
-        tk.Label(self.frame, bg=barva, width=2).pack(side=tk.LEFT, padx=(3, 5))
+    def __init__(self, parent, agent_id, barva, on_delete_cb, is_first=False):
+        super().__init__(parent, bd=1, relief=tk.GROOVE, pady=2)
+        self.agent_id = agent_id  # Fiksni ID (1–10), vezan na barvo
+        self.pack(fill=tk.X, pady=1)
 
-        tk.Label(self.frame, text=f"Agent {idx + 1}:", font=("Arial", 8, "bold")).pack(side=tk.LEFT)
+        # Vizualni indikator barve — shranjen kot instanca za posodobitev
+        self.lbl_barva = tk.Label(self, bg=barva, width=2)
+        self.lbl_barva.pack(side=tk.LEFT, padx=(3, 5))
+        self.lbl_ime = tk.Label(self, text=f"Agent {agent_id}:", font=("Arial", 8, "bold"))
+        self.lbl_ime.pack(side=tk.LEFT)
 
-        self.ent_st = self._entry("N0:", "50")
-        self.ent_r = self._entry("R:", "0.1")
-        self.ent_s = self._entry("S:", "0.05")
-        self.ent_k = self._entry("K:", "0.0005")
+        self.ent_st = self._ustvari_entry("N0:", PRIVZETI_N0)
+        self.ent_r = self._ustvari_entry("R:", PRIVZETI_R)
+        self.ent_s = self._ustvari_entry("S:", PRIVZETI_S)
+        self.ent_k = self._ustvari_entry("K:", PRIVZETI_K)
 
+        self.btn_delete = None
         if not is_first:
-            self.btn_delete = tk.Button(self.frame, text="✕", fg="red", command=on_delete_cb,
+            self.btn_delete = tk.Button(self, text="✕", fg="red", command=on_delete_cb,
                                         relief=tk.FLAT, font=("Arial", 9, "bold"))
             self.btn_delete.pack(side=tk.RIGHT, padx=3)
-        else:
-            self.btn_delete = None
 
-    def nastavi_brisanje(self, omogoceno: bool):
-        if self.btn_delete is not None:
-            self.btn_delete.config(state=tk.NORMAL if omogoceno else tk.DISABLED)
+    def update_display(self, display_idx, barva):
+        """Ni več potrebno — ID in barva sta fiksna."""
+        pass
 
-    def _entry(self, label, default):
-        tk.Label(self.frame, text=label, font=("Arial", 8)).pack(side=tk.LEFT, padx=(4, 1))
-        e = tk.Entry(self.frame, width=6, font=("Arial", 8))
+    def _ustvari_entry(self, label, default):
+        tk.Label(self, text=label, font=("Arial", 8)).pack(side=tk.LEFT, padx=(4, 1))
+        e = tk.Entry(self, width=6, font=("Arial", 8))
         e.insert(0, default)
         e.pack(side=tk.LEFT)
         return e
 
-    def get_params(self, speed):
-        r = min(1.0, max(0.0, float(self.ent_r.get())))
-        s = min(1.0, max(0.0, float(self.ent_s.get())))
-        k = min(1.0, max(0.0, float(self.ent_k.get())))
-        st = int(self.ent_st.get())
-        return {'st': st, 'r': r, 's': s, 'k': k, 'speed': speed}
+    def pridobi_parametre(self, speed):
+        return {
+            'st': int(self.ent_st.get()),
+            'r': float(self.ent_r.get()),
+            's': float(self.ent_s.get()),
+            'k': float(self.ent_k.get()),
+            'speed': speed
+        }
 
-    def destroy(self):
-        self.frame.destroy()
+    def nastavi_stanje_brisanja(self, omogoceno):
+        if self.btn_delete:
+            self.btn_delete.config(state=tk.NORMAL if omogoceno else tk.DISABLED)
 
 
-class GlavnoOkno(tk.Tk):
+class Grafikon(tk.Canvas):
+    """Specializirano platno za izris grafov in interakcijo (hover)."""
+
+    def __init__(self, parent, **kwargs):
+        super().__init__(parent, **kwargs)
+        self.ox, self.oy = GRAF_OX, GRAF_OY
+        self.w, self.h = GRAF_W, GRAF_H
+        self.linije_refs = {}
+        self.zadnja_miska = (None, None)
+        self._zadnje_zgodovine = {}
+        self._zadnje_skale = None
+        self._zadnji_aktivni_ids = []
+        self.bind("<Motion>", self._na_premik_miske)
+        self.bind("<Leave>", self._na_izhod_miske)
+        self._narisi_osi()
+        self._hover_loop()
+
+    def _narisi_osi(self):
+        self.delete("os")
+        self.create_line(self.ox, self.oy, self.ox, GRAF_OS_Y_KONEC, arrow=tk.LAST, tags="os")
+        self.create_line(self.ox, self.oy, GRAF_OS_X_KONEC, self.oy, arrow=tk.LAST, tags="os")
+        self.create_text(self.ox - 20, GRAF_OS_Y_KONEC, text="N", tags="os")
+        self.create_text(GRAF_OS_X_KONEC, self.oy + 20, text="t", tags="os")
+
+    def posodobi(self, zgodovine, aktivni_ids):
+        """Glavna metoda za ponovni izris linij in legende."""
+        skale = self._izracunaj_skale(zgodovine)
+        if not skale: return
+        min_t, max_t, min_y, max_y = skale
+
+        self._zadnje_zgodovine = {k: list(v) for k, v in zgodovine.items()}
+        self._zadnje_skale = skale
+        self._zadnji_aktivni_ids = list(aktivni_ids)
+
+        self.delete("legenda")
+        for aid in list(self.linije_refs.keys()):
+            if aid not in aktivni_ids:
+                for lid in self.linije_refs[aid]: self.delete(lid)
+                del self.linije_refs[aid]
+
+        for i, aid in enumerate(aktivni_ids):
+            data = zgodovine.get(aid, [])
+            if len(data) < 2: continue
+            barva = BARVE[aid]
+            tocke = self._pretvori_v_koordinate(data, min_t, max_t, min_y, max_y)
+            self._izrisi_pot(aid, tocke, barva)
+            self._narisi_legendo(i, aid, barva)
+
+    def _izracunaj_skale(self, zgodovine):
+        vsi_t, vsi_n = [], []
+        for h in zgodovine.values():
+            if len(h) < 2: continue
+            vsi_t.extend([h[0][0], h[-1][0]])
+            vsi_n.extend([p[1] for p in h])
+
+        if not vsi_t or max(vsi_t) == min(vsi_t): return None
+
+        max_n = max(vsi_n)
+        pad = (max_n - min(vsi_n)) * 0.1
+        return min(vsi_t), max(vsi_t), max(0, min(vsi_n) - pad), max_n + pad
+
+    def _pretvori_v_koordinate(self, data, min_t, max_t, min_y, max_y):
+        razpon_t = max_t - min_t
+        razpon_y = max_y - min_y
+
+        if len(data) > MAX_TOCKE_GRAFA:
+            korak = len(data) / MAX_TOCKE_GRAFA
+            data = [data[int(j * korak)] for j in range(MAX_TOCKE_GRAFA)]
+
+        return [(self.ox + ((t - min_t) / razpon_t) * self.w,
+                 self.oy - ((n - min_y) / razpon_y) * self.h) for t, n in data]
+
+    def _izrisi_pot(self, aid, tocke, barva):
+        if aid not in self.linije_refs: self.linije_refs[aid] = []
+        linije = self.linije_refs[aid]
+
+        potrebno = len(tocke) - 1
+        for j in range(potrebno):
+            c = (*tocke[j], *tocke[j + 1])
+            if j < len(linije):
+                self.coords(linije[j], *c)
+            else:
+                lid = self.create_line(*c, fill=barva, width=2, tags="pot")
+                linije.append(lid)
+
+        for j in range(potrebno, len(linije)): self.delete(linije[j])
+        self.linije_refs[aid] = linije[:potrebno]
+
+    def _narisi_legendo(self, i, aid, barva):
+        col = i % GRAF_LEGENDA_STOLPCI
+        row = i // GRAF_LEGENDA_STOLPCI
+        lx = GRAF_LEGENDA_X0 + col * GRAF_LEGENDA_DX
+        ly = GRAF_LEGENDA_Y0 + row * GRAF_LEGENDA_DY
+        self.create_rectangle(lx, ly - 5, lx + 12, ly + 5, fill=barva, outline=barva, tags="legenda")
+        self.create_text(lx + 16, ly, text=f"A{aid}", anchor="w", font=("Arial", 7), tags="legenda")
+
+    def _na_premik_miske(self, event):
+        self.zadnja_miska = (event.x, event.y)
+
+    def _na_izhod_miske(self, event):
+        self.zadnja_miska = (None, None)
+        self.delete("hover")
+
+    def _hover_loop(self):
+        """Fast independent hover refresh loop (~60fps)."""
+        self._osvezi_hover()
+        self.after(HOVER_FPS_MS, self._hover_loop)
+
+    def _osvezi_hover(self):
+        self.delete("hover")
+        mx, my = self.zadnja_miska
+        if mx is None or not self._zadnje_skale: return
+        if not (self.ox <= mx <= self.ox + self.w): return
+
+        zgodovine = self._zadnje_zgodovine
+        skale = self._zadnje_skale
+        aktivni_ids = self._zadnji_aktivni_ids
+
+        min_t, max_t, min_y, max_y = skale
+        razpon_t = max_t - min_t
+        razpon_y = max_y - min_y
+        t_miska = min_t + ((mx - self.ox) / self.w) * razpon_t
+
+        self.create_line(mx, self.oy - self.h, mx, self.oy,
+                         fill="#aaaaaa", dash=(4, 4), tags="hover")
+
+        besedilo_podatki = []
+        for i, aid in enumerate(aktivni_ids):
+            zgodovina = zgodovine.get(aid, [])
+            if len(zgodovina) < 2: continue
+
+            najblizja = min(zgodovina, key=lambda p: abs(p[0] - t_miska))
+            px = self.ox + ((najblizja[0] - min_t) / razpon_t) * self.w
+            py = self.oy - ((najblizja[1] - min_y) / razpon_y) * self.h
+
+            barva = BARVE[aid]
+            r = HOVER_PIKA_R
+            self.create_oval(px - r, py - r, px + r, py + r,
+                             fill=barva, outline="white", tags="hover")
+            besedilo_podatki.append((barva, f"A{aid}: N={int(najblizja[1])}"))
+
+        if besedilo_podatki:
+            t_label = f"t = {int(t_miska)}"
+            tip_x = mx + 12
+            tip_y = my - 10 - len(besedilo_podatki) * HOVER_TOOLTIP_DY
+
+            self.create_text(tip_x, tip_y, text=t_label,
+                             fill="#333333", anchor="w",
+                             font=("Arial", 8, "bold"), tags="hover")
+
+            for j, (col, txt) in enumerate(besedilo_podatki):
+                self.create_text(tip_x, tip_y + HOVER_TOOLTIP_DY + j * HOVER_TOOLTIP_DY, text=txt,
+                                 fill=col, anchor="w",
+                                 font=("Arial", 8, "bold"), tags="hover")
+
+
+# --- 4. GLAVNA APLIKACIJA (CONTROLLER) ---
+
+class EvolucijskaSimulacija(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Evolucijska Simulacija - Rast Populacije")
+        self.title("Evolucijska Simulacija")
 
-        self.zadnja_miska_x = None
-        self.zadnja_miska_y = None
-
-        self.w, self.h = 350, 350
-        self.ox, self.oy = 50, 400
-
-        # Seznam vrstic agentov (UI)
-        self.agent_vrstice: list[AgentVrstica] = []
-        # Aktivne simulacijske niti: {agent_id: SimulacijaNit}
-        self.sim_niti: dict[int, SimulacijaNit] = {}
-        # Zgodovina podatkov: {agent_id: [(t, n), ...]}
-        self.zgodovine: dict[int, list] = {}
-        # Skupna vrsta za vse niti
+        self.niti = {}
+        self.zgodovine = {}
+        self.vrstice_ui = []
         self.data_queue = queue.Queue()
-
-        self._naslednji_id = 0  # naraščajoč ID za agente
-        self._resetiran = False  # zastavica za preprečitev izrisa po restartu
-        self.nacin_simulacije = tk.StringVar(value="stohastični")
-
-        # Ločen interval za graf (redkejše osveževanje)
-        self._graf_interval_ms = 500  # osveži graf vsakih 500ms
-        # Sledenje canvas line ID-jem za vsak agent {aid: [line_id, ...]}
-        self._graf_linije: dict[int, list] = {}
+        self._prosti_ids = list(range(len(BARVE)))
+        self._resetiran = False
+        self.nacin_sim = tk.StringVar(value="stohastični")
 
         self._ustvari_vmesnik()
+        self._dodaj_vrstico()  # Prvi agent
 
-    # ------------------------------------------------------------------ #
-    #  Gradnja vmesnika
-    # ------------------------------------------------------------------ #
     def _ustvari_vmesnik(self):
-        main_container = tk.Frame(self, padx=5, pady=5)
-        main_container.pack(fill=tk.BOTH, expand=True)
+        root_fm = tk.Frame(self, padx=10, pady=10)
+        root_fm.pack(fill=tk.BOTH, expand=True)
 
-        # ---- Zgornji del: simulacijo + graf ----
-        frame_top = tk.Frame(main_container)
-        frame_top.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        top_fm = tk.Frame(root_fm)
+        top_fm.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
-        self.canvas_sim = tk.Canvas(frame_top, width=450, height=450, bg="white",
-                                    highlightthickness=1, highlightbackground="gray")
-        self.canvas_sim.pack(side=tk.LEFT, padx=2, pady=2)
+        self.platno_sim = tk.Canvas(top_fm, width=PLATNO_SIM_VELIKOST, height=PLATNO_SIM_VELIKOST,
+                                    bg="white", relief=tk.SUNKEN, bd=1)
+        self.platno_sim.pack(side=tk.LEFT, padx=5)
 
-        self.canvas_graf = tk.Canvas(frame_top, width=450, height=450, bg="#fdfdfd",
-                                     highlightthickness=1, highlightbackground="gray")
-        self.canvas_graf.pack(side=tk.RIGHT, padx=2, pady=2)
-        self.canvas_graf.bind("<Motion>", self._hover_graf)
-        self._narisi_osi()
+        self.platno_graf = Grafikon(top_fm, width=PLATNO_GRAF_VELIKOST, height=PLATNO_GRAF_VELIKOST,
+                                    bg="#fdfdfd", relief=tk.SUNKEN, bd=1)
+        self.platno_graf.pack(side=tk.RIGHT, padx=5)
 
-        # ---- Spodnji del: nadzor ----
-        frame_ctrl = tk.LabelFrame(main_container, text=" Nadzor ", padx=5, pady=5)
-        frame_ctrl.pack(side=tk.BOTTOM, fill=tk.X, pady=(5, 0))
+        self.ctrl_fm = tk.LabelFrame(root_fm, text=" Nadzor simulacije ", padx=10, pady=10)
+        self.ctrl_fm.pack(side=tk.BOTTOM, fill=tk.X, pady=10)
 
-        # Gumbi za splošno upravljanje
-        buttons_frame = tk.Frame(frame_ctrl)
-        buttons_frame.pack(side=tk.TOP, fill=tk.X)
+        self._zgradi_gumbe()
+        self._zgradi_seznam_agentov()
 
-        self.btn_start = tk.Button(buttons_frame, text="Zaženi vse", command=self._start_vse, bg="#ccffcc")
-        self.btn_start.pack(side=tk.LEFT, padx=2)
-
-        self.btn_pause = tk.Button(buttons_frame, text="Pavza vse", command=self._toggle_pause_vse,
-                                   state=tk.DISABLED)
-        self.btn_pause.pack(side=tk.LEFT, padx=2)
-
-        self.btn_restart = tk.Button(buttons_frame, text="Restart vse", command=self._restart_vse,
-                                     bg="#ffcccc", state=tk.DISABLED)
-        self.btn_restart.pack(side=tk.LEFT, padx=2)
-
-        self.btn_dodaj = tk.Button(buttons_frame, text="+ Dodaj agenta", command=self._dodaj_vrstico,
-                                   bg="#cce5ff")
-        self.btn_dodaj.pack(side=tk.LEFT, padx=10)
-
-        # Način simulacije
-        nacin_frame = tk.LabelFrame(buttons_frame, text="Način", padx=4, pady=2)
-        nacin_frame.pack(side=tk.LEFT, padx=(5, 10))
-        self.rb_stohastični = tk.Radiobutton(nacin_frame, text="Stohastični", variable=self.nacin_simulacije,
-                                             value="stohastični")
-        self.rb_stohastični.pack(side=tk.LEFT)
-        self.rb_deterministični = tk.Radiobutton(nacin_frame, text="Deterministični  ∆N=(R−S−K·N)·N",
-                                                 variable=self.nacin_simulacije, value="deterministični")
-        self.rb_deterministični.pack(side=tk.LEFT)
-
-        # Globalno osveževanje simulacije
-        tk.Label(buttons_frame, text="Sim (s):").pack(side=tk.LEFT, padx=(15, 2))
-        self.ent_speed = tk.Entry(buttons_frame, width=6)
-        self.ent_speed.insert(0, "0.1")
-        self.ent_speed.pack(side=tk.LEFT)
-
-        # Osveževanje grafa
-        tk.Label(buttons_frame, text="Graf (s):").pack(side=tk.LEFT, padx=(8, 2))
-        self.ent_graf_speed = tk.Entry(buttons_frame, width=6)
-        self.ent_graf_speed.insert(0, "0.5")
-        self.ent_graf_speed.pack(side=tk.LEFT)
-
-        self.btn_nastavi = tk.Button(buttons_frame, text="Nastavi", command=self._nastavi_speed, state=tk.DISABLED)
-        self.btn_nastavi.pack(side=tk.LEFT, padx=3)
-
-        # Scrollable območje za vrstice agentov
-        agents_outer = tk.Frame(frame_ctrl, bd=1, relief=tk.SUNKEN)
-        agents_outer.pack(side=tk.TOP, fill=tk.X, pady=(5, 0))
-
-        canvas_scroll = tk.Canvas(agents_outer, height=110, highlightthickness=0)
-        scrollbar = ttk.Scrollbar(agents_outer, orient="vertical", command=canvas_scroll.yview)
-        canvas_scroll.configure(yscrollcommand=scrollbar.set)
-
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        canvas_scroll.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        self.agents_frame = tk.Frame(canvas_scroll)
-        self.agents_frame_id = canvas_scroll.create_window((0, 0), window=self.agents_frame, anchor="nw")
-
-        def _on_frame_configure(e):
-            canvas_scroll.configure(scrollregion=canvas_scroll.bbox("all"))
-
-        def _on_canvas_configure(e):
-            canvas_scroll.itemconfig(self.agents_frame_id, width=e.width)
-
-        self.agents_frame.bind("<Configure>", _on_frame_configure)
-        canvas_scroll.bind("<Configure>", _on_canvas_configure)
-
-        # Mousewheel scrolling
-        def _on_mousewheel(e):
-            canvas_scroll.yview_scroll(int(-1 * (e.delta / 120)), "units")
-
-        canvas_scroll.bind("<MouseWheel>", _on_mousewheel)
-
-        # Info label (skupna populacija)
-        self.lbl_info = tk.Label(main_container, text="Skupna populacija: 0", font=("Arial", 9, "bold"))
+        self.lbl_info = tk.Label(root_fm, text="Skupna populacija: 0", font=("Arial", 10, "bold"))
         self.lbl_info.pack(side=tk.BOTTOM, anchor="e")
 
-        # Prva (privzeta) vrstica agenta
-        self._dodaj_vrstico()
+    def _zgradi_gumbe(self):
+        btn_box = tk.Frame(self.ctrl_fm)
+        btn_box.pack(fill=tk.X)
 
-    # ------------------------------------------------------------------ #
-    #  Upravljanje vrstic agentov
-    # ------------------------------------------------------------------ #
+        self.btn_start = tk.Button(btn_box, text="ZAŽENI", bg="#ccffcc", width=12, command=self.start_simulacije)
+        self.btn_start.pack(side=tk.LEFT, padx=2)
+
+        self.btn_pause = tk.Button(btn_box, text="PAVZA", state=tk.DISABLED, width=12, command=self.toggle_pause)
+        self.btn_pause.pack(side=tk.LEFT, padx=2)
+
+        self.btn_restart = tk.Button(btn_box, text="RESTART", bg="#ffcccc", state=tk.DISABLED, width=12,
+                                     command=self.restart_simulacije)
+        self.btn_restart.pack(side=tk.LEFT, padx=2)
+
+        self.btn_dodaj = tk.Button(btn_box, text="+ DODAJ AGENTA", bg="#cce5ff", command=self._dodaj_vrstico)
+        self.btn_dodaj.pack(side=tk.LEFT, padx=20)
+
+        tk.Label(btn_box, text="Način:").pack(side=tk.LEFT, padx=(10, 2))
+        self.cmb_nacin = ttk.Combobox(btn_box, textvariable=self.nacin_sim,
+                                      values=["stohastični", "deterministični"],
+                                      width=15, state="readonly")
+        self.cmb_nacin.pack(side=tk.LEFT)
+
+        tk.Label(btn_box, text="Hitrost Sim (s):").pack(side=tk.LEFT, padx=(15, 2))
+        self.ent_sim_speed = tk.Entry(btn_box, width=5)
+        self.ent_sim_speed.insert(0, PRIVZETA_HITROST_SIM)
+        self.ent_sim_speed.pack(side=tk.LEFT)
+
+        tk.Label(btn_box, text="Osveževanje Grafa (s):").pack(side=tk.LEFT, padx=(15, 2))
+        self.ent_graf_speed = tk.Entry(btn_box, width=5)
+        self.ent_graf_speed.insert(0, PRIVZETA_HITROST_GRAF)
+        self.ent_graf_speed.pack(side=tk.LEFT)
+
+    def _zgradi_seznam_agentov(self):
+        """Ustvari scrollable področje za vrstice agentov."""
+        outer = tk.Frame(self.ctrl_fm, bd=1, relief=tk.SUNKEN)
+        outer.pack(fill=tk.X, pady=10)
+
+        canvas = tk.Canvas(outer, height=SEZNAM_AGENTOV_VISINA)
+        scroll = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+        self.seznam_fm = tk.Frame(canvas)
+
+        self.seznam_fm.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=self.seznam_fm, anchor="nw")
+        canvas.configure(yscrollcommand=scroll.set)
+
+        scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
     def _dodaj_vrstico(self):
-        idx = len(self.agent_vrstice)
-        barva = BARVE[idx % len(BARVE)]
-        is_first = (idx == 0)
-
-        def on_delete(i=idx):
-            self._izbrisi_vrstico(i)
-
-        vrstica = AgentVrstica(self.agents_frame, idx, barva, on_delete, is_first)
-        self.agent_vrstice.append(vrstica)
-
-    def _izbrisi_vrstico(self, idx):
-        # Poiščemo vrstico po indeksu (agent_vrstice se ne sme reshuffleati med tekom)
-        # Poiščemo objekt po .idx
-        target = None
-        for v in self.agent_vrstice:
-            if v.idx == idx:
-                target = v
-                break
-        if target is None:
+        """Doda novega agenta v UI — vzame najnižji prosti ID iz poola."""
+        if not self._prosti_ids:
             return
-        target.destroy()
-        self.agent_vrstice.remove(target)
+        aid = self._prosti_ids.pop(0)
+        barva = BARVE[aid]
+        is_first = (aid == 0 and len(self.vrstice_ui) == 0)
+        vrstica = AgentVrstica(self.seznam_fm, aid, barva,
+                               lambda a=aid: self._odstrani_vrstico(a), is_first=is_first)
+        self.vrstice_ui.append(vrstica)
 
-    # ------------------------------------------------------------------ #
-    #  Simulacija
-    # ------------------------------------------------------------------ #
-    def _start_vse(self):
-        if self.sim_niti:
-            return  # že teče
+    def _odstrani_vrstico(self, aid):
+        """Odstrani agenta iz UI in vrne njegov ID nazaj v pool."""
+        vrstica = next((v for v in self.vrstice_ui if v.agent_id == aid), None)
+        if not vrstica:
+            return
+        vrstica.destroy()
+        self.vrstice_ui.remove(vrstica)
+        self._prosti_ids.append(aid)
+        self._prosti_ids.sort()
 
-        self.zgodovine.clear()
-        self._naslednji_id = 0
-        self._resetiran = False
-
-        try:
-            speed = float(self.ent_speed.get())
-        except ValueError:
-            speed = 0.1
-
-        try:
-            self._graf_interval_ms = max(100, int(float(self.ent_graf_speed.get()) * 1000))
-        except ValueError:
-            self._graf_interval_ms = 500
-
-        nacin = self.nacin_simulacije.get()
-
-        for vrstica in self.agent_vrstice:
-            try:
-                params = vrstica.get_params(speed)
-                params['nacin'] = nacin
-            except ValueError:
-                print(f"Napačen vnos za agenta {vrstica.idx + 1}!")
-                continue
-
-            agent_id = self._naslednji_id
-            self._naslednji_id += 1
-            self.zgodovine[agent_id] = []
-
-            nit = SimulacijaNit(self.data_queue, params, agent_id)
-            self.sim_niti[agent_id] = nit
-            nit.start()
-
-        if self.sim_niti:
+    def _nastavi_predvajanje_ui(self, tece):
+        """Preklopi UI elemente glede na to, ali simulacija teče ali ne."""
+        if tece:
             self.btn_start.config(state=tk.DISABLED)
             self.btn_pause.config(state=tk.NORMAL)
             self.btn_restart.config(state=tk.NORMAL)
             self.btn_dodaj.config(state=tk.DISABLED)
-            self.btn_nastavi.config(state=tk.DISABLED)
-            self.rb_stohastični.config(state=tk.DISABLED)
-            self.rb_deterministični.config(state=tk.DISABLED)
-            for vrstica in self.agent_vrstice:
-                vrstica.nastavi_brisanje(False)
-            self._osvezi_prikaz()
-            self.after(self._graf_interval_ms, self._osvezi_graf)
-
-    def _toggle_pause_vse(self):
-        any_paused = any(n.paused for n in self.sim_niti.values())
-        for nit in self.sim_niti.values():
-            nit.paused = not any_paused
-        if not any_paused:
-            # Prehod v pavzo
-            self.btn_pause.config(text="Nadaljuj vse")
-            self.btn_nastavi.config(state=tk.NORMAL)
+            self.cmb_nacin.config(state=tk.DISABLED)
+            for v in self.vrstice_ui: v.nastavi_stanje_brisanja(False)
         else:
-            # Nadaljevanje — Nastavi ni več potreben
-            self.btn_pause.config(text="Pavza vse")
-            self.btn_nastavi.config(state=tk.DISABLED)
+            self.btn_start.config(state=tk.NORMAL)
+            self.btn_pause.config(state=tk.DISABLED, text="PAVZA")
+            self.btn_restart.config(state=tk.DISABLED)
+            self.btn_dodaj.config(state=tk.NORMAL)
+            self.cmb_nacin.config(state="readonly")
+            for v in self.vrstice_ui: v.nastavi_stanje_brisanja(True)
 
-    def _restart_vse(self):
-        self._resetiran = True  # ustavi izrisovanje takoj
+    def start_simulacije(self):
+        self._resetiran = False
+        try:
+            s_speed = float(self.ent_sim_speed.get())
+            g_speed = float(self.ent_graf_speed.get())
+        except ValueError:
+            return
 
-        for nit in self.sim_niti.values():
-            nit.stop()
-        self.sim_niti.clear()
+        for vrstica in self.vrstice_ui:
+            params = vrstica.pridobi_parametre(s_speed)
+            params['nacin'] = self.nacin_sim.get()
+
+            aid = vrstica.agent_id
+            thread = SimulacijaNit(self.data_queue, params, aid, self.ent_sim_speed)
+            self.niti[aid] = thread
+            self.zgodovine[aid] = []
+            thread.start()
+
+        self._nastavi_predvajanje_ui(True)
+        self._procesiraj_vrsto()
+        self.after(int(g_speed * 1000), self._osvezi_grafikon)
+
+    def _procesiraj_vrsto(self):
+        """Glavna zanka za posodabljanje pozicij agentov na platnu."""
+        if self._resetiran: return
+
+        try:
+            while True:
+                data = self.data_queue.get_nowait()
+                aid = data['agent_id']
+
+                self.zgodovine[aid].append((data['cas'], data['n']))
+                if len(self.zgodovine[aid]) > MAX_ZGODOVINA:
+                    self.zgodovine[aid].pop(0)
+
+                tag = f"obj_{aid}"
+                self.platno_sim.delete(tag)
+
+                for x, y in data['pozicije']:
+                    self.platno_sim.create_oval(x - 3, y - 3, x + 3, y + 3, fill=BARVE[aid],
+                                                outline=BARVE_ORIS[aid], tags=tag)
+        except queue.Empty:
+            pass
+
+        self._posodobi_stevec_populacije()
+        self.after(SIM_OSVEZI_MS, self._procesiraj_vrsto)
+
+    def _osvezi_grafikon(self):
+        """Zanka za osveževanje grafa (ločena hitrost)."""
+        if self._resetiran: return
+        self.platno_graf.posodobi(self.zgodovine, list(self.niti.keys()))
+
+        try:
+            ms = max(GRAF_OSVEZI_MIN_MS, int(float(self.ent_graf_speed.get()) * 1000))
+            self.after(ms, self._osvezi_grafikon)
+        except:
+            self.after(GRAF_OSVEZI_FALLBACK_MS, self._osvezi_grafikon)
+
+    def _posodobi_stevec_populacije(self):
+        skupaj = sum(h[-1][1] for h in self.zgodovine.values() if h)
+        self.lbl_info.config(text=f"Skupna populacija: {skupaj}")
+
+    def toggle_pause(self):
+        je_pavzirano = any(t.paused for t in self.niti.values())
+        for t in self.niti.values():
+            t.paused = not je_pavzirano
+        self.btn_pause.config(text="NADALJUJ" if not je_pavzirano else "PAVZA")
+
+    def restart_simulacije(self):
+        self._resetiran = True
+        for t in self.niti.values(): t.stop()
+        self.niti.clear()
         self.zgodovine.clear()
 
-        # Izpraznimo vrsto, da ne pride do zaostalih podatkov
+        # Izprazni vrsto — zavrzi vse zaostale pakete prejšnjega teka
         while not self.data_queue.empty():
             try:
                 self.data_queue.get_nowait()
             except queue.Empty:
                 break
 
-        self.canvas_sim.delete("all")
-        self.canvas_graf.delete("pot", "hover", "legenda")
-        self._graf_linije.clear()
-        self._narisi_osi()
-        self.lbl_info.config(text="Skupna populacija: 0")
+        self.platno_sim.delete("all")
 
-        self.btn_start.config(state=tk.NORMAL)
-        self.btn_pause.config(state=tk.DISABLED, text="Pavza vse")
-        self.btn_restart.config(state=tk.DISABLED)
-        self.btn_dodaj.config(state=tk.NORMAL)
-        self.btn_nastavi.config(state=tk.DISABLED)
-        self.rb_stohastični.config(state=tk.NORMAL)
-        self.rb_deterministični.config(state=tk.NORMAL)
-        for vrstica in self.agent_vrstice:
-            vrstica.nastavi_brisanje(True)
+        # Popolno brisanje grafa in reset vseh notranjih stanj
+        self.platno_graf.delete("all")
+        self.platno_graf.linije_refs.clear()
+        self.platno_graf._zadnje_skale = None
+        self.platno_graf._zadnje_zgodovine = {}
+        self.platno_graf._zadnji_aktivni_ids = []
+        self.platno_graf._narisi_osi()
 
-    def _nastavi_speed(self):
-        try:
-            speed = float(self.ent_speed.get())
-        except ValueError:
-            speed = None
-        if speed is not None:
-            for nit in self.sim_niti.values():
-                nit.params['speed'] = speed
-
-        try:
-            graf_speed = float(self.ent_graf_speed.get())
-            self._graf_interval_ms = max(100, int(graf_speed * 1000))
-        except ValueError:
-            pass
-
-    # ------------------------------------------------------------------ #
-    #  Prikaz
-    # ------------------------------------------------------------------ #
-    def _osvezi_prikaz(self):
-        if self._resetiran:
-            return
-
-        novi_podatki_prisli = False
-
-        try:
-            while True:
-                podatki = self.data_queue.get_nowait()
-                novi_podatki_prisli = True
-                aid = podatki['agent_id']
-
-                if aid not in self.zgodovine:
-                    self.zgodovine[aid] = []
-                self.zgodovine[aid].append((podatki['cas'], podatki['n']))
-                # Drseče okno - ohrani samo zadnjih MAX_ZGODOVINA točk
-                if len(self.zgodovine[aid]) > MAX_ZGODOVINA:
-                    self.zgodovine[aid] = self.zgodovine[aid][-MAX_ZGODOVINA:]
-
-                # Izris bitij na platnu simulacije
-                tag = f"bitje_{aid}"
-                barva_idx = list(self.sim_niti.keys()).index(aid) if aid in self.sim_niti else 0
-                fill = BARVE[barva_idx % len(BARVE)]
-                outline = BARVE_ORIS[barva_idx % len(BARVE_ORIS)]
-
-                self.canvas_sim.delete(tag)
-                for x, y in podatki['pozicije']:
-                    self.canvas_sim.create_oval(x - 3, y - 3, x + 3, y + 3,
-                                                fill=fill, outline=outline, tags=tag)
-
-        except queue.Empty:
-            pass
-
-        if novi_podatki_prisli:
-            self._posodobi_skupno_populacijo()
-            # Graf in hover se osvežujeta v ločenem ciklu (_osvezi_graf)
-
-        if any(n.running for n in self.sim_niti.values()):
-            try:
-                speed = float(self.ent_speed.get())
-            except ValueError:
-                speed = 0.1
-            # UI osveževanje je vsaj 30ms, sicer enako kot simulacijski korak
-            interval_ms = max(30, int(speed * 1000))
-            self.after(interval_ms, self._osvezi_prikaz)
-
-    def _osvezi_graf(self):
-        """Ločen cikel za osveževanje grafa - neodvisen od simulacije."""
-        if self._resetiran:
-            return
-        self._izris_grafa()
-        self._osvezi_hover_vizualizacijo()
-        if any(n.running for n in self.sim_niti.values()):
-            self.after(self._graf_interval_ms, self._osvezi_graf)
-
-    def _posodobi_skupno_populacijo(self):
-        skupaj = 0
-        for zgodovina in self.zgodovine.values():
-            if zgodovina:
-                skupaj += zgodovina[-1][1]
-        self.lbl_info.config(text=f"Skupna populacija: {skupaj}")
-
-    # ------------------------------------------------------------------ #
-    #  Graf
-    # ------------------------------------------------------------------ #
-    def _narisi_osi(self):
-        self.canvas_graf.delete("os")
-        self.canvas_graf.create_line(50, 400, 50, 40, arrow=tk.LAST, tags="os")
-        self.canvas_graf.create_line(50, 400, 410, 400, arrow=tk.LAST, tags="os")
-        self.canvas_graf.create_text(30, 40, text="N", tags="os")
-        self.canvas_graf.create_text(410, 420, text="t", tags="os")
-
-    def _izris_grafa(self):
-        # Globalni min/max za drsno okno x-osi in skupno skalo y-osi
-        global_min_t = None
-        global_max_t = None
-        global_min_n = None
-        global_max_n = None
-        for zgodovina in self.zgodovine.values():
-            if len(zgodovina) >= 2:
-                t_zac = zgodovina[0][0]
-                t_kon = zgodovina[-1][0]
-                vse_n = [p[1] for p in zgodovina]
-                global_min_t = t_zac if global_min_t is None else min(global_min_t, t_zac)
-                global_max_t = t_kon if global_max_t is None else max(global_max_t, t_kon)
-                global_min_n = min(vse_n) if global_min_n is None else min(global_min_n, min(vse_n))
-                global_max_n = max(vse_n) if global_max_n is None else max(global_max_n, max(vse_n))
-
-        if global_max_t is None or global_max_t == global_min_t:
-            return
-
-        razpon_n = max(1, global_max_n - global_min_n)
-        padding_n = razpon_n * 0.10
-        y_min = max(0, global_min_n - padding_n)
-        y_max = global_max_n + padding_n
-        razpon_y = y_max - y_min
-        razpon_t = global_max_t - global_min_t
-
-        agent_ids = list(self.sim_niti.keys())
-
-        # Briši legendo in odvečne agentove linije
-        self.canvas_graf.delete("legenda")
-        aktivni_aids = set(agent_ids)
-        for aid in list(self._graf_linije.keys()):
-            if aid not in aktivni_aids:
-                for lid in self._graf_linije[aid]:
-                    self.canvas_graf.delete(lid)
-                del self._graf_linije[aid]
-
-        for i, aid in enumerate(agent_ids):
-            zgodovina = self.zgodovine.get(aid, [])
-            if len(zgodovina) < 2:
-                continue
-
-            barva = BARVE[i % len(BARVE)]
-
-            # Redčenje
-            if len(zgodovina) > MAX_TOCKE_GRAFA:
-                korak = len(zgodovina) / MAX_TOCKE_GRAFA
-                zgodovina_izris = [zgodovina[int(j * korak)] for j in range(MAX_TOCKE_GRAFA)]
-                if zgodovina_izris[-1] != zgodovina[-1]:
-                    zgodovina_izris.append(zgodovina[-1])
-            else:
-                zgodovina_izris = zgodovina
-
-            # Pretvori v canvas koordinate
-            tocke = []
-            for t, n in zgodovina_izris:
-                px = self.ox + ((t - global_min_t) / razpon_t) * self.w
-                py = self.oy - ((n - y_min) / razpon_y) * self.h
-                tocke.append((px, py))
-
-            potrebnih_crt = len(tocke) - 1
-            obstojecih_crt = len(self._graf_linije.get(aid, []))
-
-            if aid not in self._graf_linije:
-                self._graf_linije[aid] = []
-
-            linije = self._graf_linije[aid]
-
-            # Recikliraj obstoječe linije z coords(), dodaj nove, briši odvečne
-            for j in range(potrebnih_crt):
-                x1, y1 = tocke[j]
-                x2, y2 = tocke[j + 1]
-                if j < obstojecih_crt:
-                    self.canvas_graf.coords(linije[j], x1, y1, x2, y2)
-                else:
-                    lid = self.canvas_graf.create_line(x1, y1, x2, y2,
-                                                       fill=barva, width=2, tags="pot")
-                    linije.append(lid)
-
-            # Briši odvečne linije če je točk zdaj manj (npr. po restartu)
-            for j in range(potrebnih_crt, obstojecih_crt):
-                self.canvas_graf.delete(linije[j])
-            self._graf_linije[aid] = linije[:potrebnih_crt]
-
-        # Legenda
-        for i, aid in enumerate(agent_ids):
-            barva = BARVE[i % len(BARVE)]
-            lx = 60 + i * 80
-            ly = 20
-            self.canvas_graf.create_rectangle(lx, ly - 6, lx + 16, ly + 6,
-                                              fill=barva, outline=barva, tags="legenda")
-            self.canvas_graf.create_text(lx + 22, ly, text=f"A{i + 1}", anchor="w",
-                                         font=("Arial", 8), tags="legenda")
-
-    # ------------------------------------------------------------------ #
-    #  Hover
-    # ------------------------------------------------------------------ #
-    def _hover_graf(self, event):
-        self.zadnja_miska_x = event.x
-        self.zadnja_miska_y = event.y
-        self._osvezi_hover_vizualizacijo()
-
-    def _osvezi_hover_vizualizacijo(self):
-        self.canvas_graf.delete("hover")
-
-        if not self.zgodovine or self.zadnja_miska_x is None:
-            return
-
-        v_coni_x = self.ox <= self.zadnja_miska_x <= (self.ox + self.w)
-        v_coni_y = (self.oy - self.h) <= self.zadnja_miska_y <= self.oy
-        if not (v_coni_x and v_coni_y):
-            return
-
-        global_min_t = None
-        global_max_t = None
-        global_min_n = None
-        global_max_n = None
-        for zgodovina in self.zgodovine.values():
-            if len(zgodovina) >= 2:
-                t_zac = zgodovina[0][0]
-                t_kon = zgodovina[-1][0]
-                vse_n = [p[1] for p in zgodovina]
-                global_min_t = t_zac if global_min_t is None else min(global_min_t, t_zac)
-                global_max_t = t_kon if global_max_t is None else max(global_max_t, t_kon)
-                global_min_n = min(vse_n) if global_min_n is None else min(global_min_n, min(vse_n))
-                global_max_n = max(vse_n) if global_max_n is None else max(global_max_n, max(vse_n))
-
-        if global_max_t is None or global_max_t == global_min_t:
-            return
-
-        razpon_n = max(1, global_max_n - global_min_n)
-        padding_n = razpon_n * 0.10
-        y_min = max(0, global_min_n - padding_n)
-        y_max = global_max_n + padding_n
-        razpon_y = y_max - y_min
-
-        razpon_t = global_max_t - global_min_t
-        t_miska = global_min_t + ((self.zadnja_miska_x - self.ox) / self.w) * razpon_t
-
-        # Navpična črta
-        self.canvas_graf.create_line(self.zadnja_miska_x, self.oy - self.h,
-                                     self.zadnja_miska_x, self.oy,
-                                     fill="#cccccc", dash=(4, 4), tags="hover")
-
-        agent_ids = list(self.sim_niti.keys())
-        tekst_vrstice = []
-
-        for i, aid in enumerate(agent_ids):
-            zgodovina = self.zgodovine.get(aid, [])
-            if len(zgodovina) < 2:
-                continue
-
-            barva = BARVE[i % len(BARVE)]
-            najblizja = min(zgodovina, key=lambda p: abs(p[0] - t_miska))
-
-            px = self.ox + ((najblizja[0] - global_min_t) / razpon_t) * self.w
-            py = self.oy - ((najblizja[1] - y_min) / razpon_y) * self.h
-
-            self.canvas_graf.create_oval(px - 4, py - 4, px + 4, py + 4,
-                                         fill=barva, outline="white", tags="hover")
-
-            tekst_vrstice.append((barva, f"A{i + 1} t:{najblizja[0]} N:{int(najblizja[1])}"))
-
-        # Izpis besedila za vsak agent
-        base_y = self.zadnja_miska_y - 15 - (len(tekst_vrstice) - 1) * 14
-        for j, (barva, tekst) in enumerate(tekst_vrstice):
-            self.canvas_graf.create_text(
-                self.zadnja_miska_x, base_y + j * 14,
-                text=tekst, anchor="s", font=("Arial", 8, "bold"),
-                fill=barva, tags="hover"
-            )
-
+        self._nastavi_predvajanje_ui(False)
 
 if __name__ == "__main__":
-    app = GlavnoOkno()
+    app = EvolucijskaSimulacija()
     app.mainloop()
