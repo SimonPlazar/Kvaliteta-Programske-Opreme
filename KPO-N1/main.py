@@ -54,90 +54,55 @@ class SimulacijaNit(threading.Thread):
                 nacin = self.params.get('nacin', 'stohastični')
 
                 if nacin == 'deterministični':
-                    # Deterministična logistična enačba: ∆N = (R - S - K*N) * N
-                    nova_generacija = []
-                    delta = int((r - s - k * n) * n)
+                    # ΔN = (R - S - K*N) * N
+                    delta = int(round((r - s - k * n) * n))
 
-                    # obstoječi agenti preživijo (lahko dodaš pogoje)
+                    # Update positions for existing agents
                     for agent in self.agenti:
                         agent.premakni(450, 450)
-                        nova_generacija.append(agent)
 
-                    # dodamo nove agente če je delta pozitivna
                     if delta > 0:
+                        # Add new creatures at random locations
                         for _ in range(delta):
-                            nova_generacija.append(Agent(random.randint(50, 400), random.randint(50, 400)))
-
-                    # če je delta negativen → populacija se zmanjša
+                            self.agenti.append(Agent(random.randint(50, 400), random.randint(50, 400)))
                     elif delta < 0:
-                        nova_generacija = nova_generacija[:delta]  # odstrani nekaj agentov
+                        # Remove |delta| creatures randomly
+                        num_to_remove = min(abs(delta), len(self.agenti))
+                        for _ in range(num_to_remove):
+                            if self.agenti:
+                                self.agenti.pop(random.randrange(len(self.agenti)))
 
-                    self.agenti = nova_generacija
-
-                    # nova_generacija = []
-                    # p_smrt = min(1.0, s + k * n)
-                    # p_rojstvo = r * (1.0 - p_smrt)
-                    #
-                    # for agent in self.agenti:
-                    #     agent.premakni(450, 450)
-                    #     roll = random.random()
-                    #
-                    #     if roll < p_smrt:
-                    #         pass  # umre
-                    #     elif roll < p_smrt + p_rojstvo:
-                    #         nova_generacija.append(agent)  # preživi
-                    #         nova_generacija.append(Agent(agent.x, agent.y))  # + potomec
-                    #     else:
-                    #         nova_generacija.append(agent)  # samo preživi
-                    #
-                    # self.agenti = nova_generacija
                 else:
-                    # Stohastični način (originalni)
-                    nova_generacija = []
+                    # Stohastični način
+                    nova_populacija = []
+
+                    # Verjetnost smrti se povečuje z N zaradi faktorja K
+                    # Dejanska smrtnost = s + k*n
+                    verjetnost_smrti = s + (k * n)
+
                     for agent in self.agenti:
                         agent.premakni(450, 450)
-                        # prilagojena smrtnost
-                        verjetnost_smrti = s + k * n
 
-                        # preveri razmnoževanje
+                        # 1. Ali bitje preživi?
+                        if random.random() >= verjetnost_smrti:
+                            nova_populacija.append(agent)
+
+                        # 2. Ali se bitje razmnoži? (neodvisen dogodek)
                         if random.random() < r:
-                            nova_generacija.append(Agent(random.randint(50, 400), random.randint(50, 400)))
+                            nova_populacija.append(Agent(random.randint(20, 430), random.randint(20, 430)))
 
-                        # preveri ali agent umre
-                        if random.random() < verjetnost_smrti:
-                            continue  # agent umre
-
-                        # agent preživi
-                        nova_generacija.append(agent)
-
-                    self.agenti = nova_generacija
-
-                    # nova_generacija = []
-                    # for agent in self.agenti:
-                    #     agent.premakni(450, 450)
-                    #     if random.random() < r:
-                    #         nova_generacija.append(Agent(agent.x, agent.y))
-                    #     p_smrt = s + (k * n)
-                    #     if random.random() >= p_smrt:
-                    #         nova_generacija.append(agent)
-                    # self.agenti = nova_generacija
+                    self.agenti = nova_populacija
 
                 pozicije_za_izris = [(a.x, a.y) for a in self.agenti[:1000]]
-
                 podatki = {
                     'agent_id': self.agent_id,
                     'n': len(self.agenti),
                     'cas': casovni_korak,
                     'pozicije': pozicije_za_izris
                 }
-                # Prepreči kopičenje v vrsti - zavrži stare podatke če UI ne sledi
+
                 if self.data_queue.qsize() < 50:
                     self.data_queue.put(podatki)
-                else:
-                    self.zavrnjeni_koraki += 1
-                    print(f"[OPOZORILO] Agent {self.agent_id}: UI zaostaja! "
-                          f"Korak t={casovni_korak} zavržen. "
-                          f"Skupaj zavrnjenih: {self.zavrnjeni_koraki}")
                 casovni_korak += 1
 
             time.sleep(self.params['speed'])
