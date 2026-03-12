@@ -11,40 +11,40 @@ BARVE_ORIS = ["darkblue", "darkred", "darkgreen", "darkorange", "indigo", "saddl
               "midnightblue", "darkolivegreen"]
 
 # Agent / simulacija
-AGENT_PREMIK = 10               # Največji korak premika agenta na korak
-AGENT_SPAWN_MIN = 20            # Minimalna koordinata pri ustvarjanju agentov
-AGENT_SPAWN_MAX = 430           # Maksimalna koordinata pri ustvarjanju agentov
-PLATNO_SIM_VELIKOST = 450       # Širina/višina simulacijskega platna (px)
-PLATNO_SIM_MEJA = 10            # Rob, znotraj katerega ostanejo agenti
-QUEUE_MAX = 50                  # Največje število sporočil v vrsti
-POZICIJ_MAX = 1000              # Koliko pozicij agentov pošljemo UI-ju na korak
+AGENT_PREMIK = 10  # Največji korak premika agenta na korak
+AGENT_SPAWN_MIN = 20  # Minimalna koordinata pri ustvarjanju agentov
+AGENT_SPAWN_MAX = 430  # Maksimalna koordinata pri ustvarjanju agentov
+PLATNO_SIM_VELIKOST = 450  # Širina/višina simulacijskega platna (px)
+PLATNO_SIM_MEJA = 10  # Rob, znotraj katerega ostanejo agenti
+QUEUE_MAX = 50  # Največje število sporočil v vrsti
+POZICIJ_MAX = 1000  # Koliko pozicij agentov pošljemo UI-ju na korak
 
 # Graf
-GRAF_OX = 50                    # X izhodišče grafa
-GRAF_OY = 400                   # Y izhodišče grafa
-GRAF_W = 350                    # Širina grafa (px)
-GRAF_H = 350                    # Višina grafa (px)
-GRAF_OS_X_KONEC = 410           # Konec x osi grafa
-GRAF_OS_Y_KONEC = 40            # Konec y osi grafa (vrh)
-GRAF_LEGENDA_X0 = 55            # X začetek prve legende
-GRAF_LEGENDA_DX = 78            # Razmik med legendami
-GRAF_LEGENDA_Y0 = 14            # Y pozicija prve vrstice legend
-GRAF_LEGENDA_DY = 16            # Razmik med vrsticama legend
-GRAF_LEGENDA_STOLPCI = 5        # Koliko legend na vrstico
-HOVER_FPS_MS = 16               # Interval hover zanke (~60fps)
-HOVER_PIKA_R = 4                # Polmer pike pri hoverju
-HOVER_TOOLTIP_DY = 13           # Razmik vrstic v tooltippu
-MAX_ZGODOVINA = 200             # Največje število točk v zgodovini na agenta
-MAX_TOCKE_GRAFA = 400           # Največje število točk izrisanih na grafu
+GRAF_OX = 50  # X izhodišče grafa
+GRAF_OY = 400  # Y izhodišče grafa
+GRAF_W = 350  # Širina grafa (px)
+GRAF_H = 350  # Višina grafa (px)
+GRAF_OS_X_KONEC = 410  # Konec x osi grafa
+GRAF_OS_Y_KONEC = 40  # Konec y osi grafa (vrh)
+GRAF_LEGENDA_X0 = 55  # X začetek prve legende
+GRAF_LEGENDA_DX = 78  # Razmik med legendami
+GRAF_LEGENDA_Y0 = 14  # Y pozicija prve vrstice legend
+GRAF_LEGENDA_DY = 16  # Razmik med vrsticama legend
+GRAF_LEGENDA_STOLPCI = 5  # Koliko legend na vrstico
+HOVER_FPS_MS = 16  # Interval hover zanke (~60fps)
+HOVER_PIKA_R = 4  # Polmer pike pri hoverju
+HOVER_TOOLTIP_DY = 13  # Razmik vrstic v tooltippu
+MAX_ZGODOVINA = 200  # Največje število točk v zgodovini na agenta
+MAX_TOCKE_GRAFA = 400  # Največje število točk izrisanih na grafu
 
 # UI
-PLATNO_GRAF_VELIKOST = 450      # Širina/višina grafičnega platna (px)
-SEZNAM_AGENTOV_VISINA = 120     # Višina scrollable področja agentov (px)
-PRIVZETA_HITROST_SIM = "0.1"    # Privzeta hitrost simulacije (s)
-PRIVZETA_HITROST_GRAF = "0.5"   # Privzeto osveževanje grafa (s)
-GRAF_OSVEZI_MIN_MS = 50         # Minimalni interval osveževanja grafa (ms)
-GRAF_OSVEZI_FALLBACK_MS = 500   # Fallback interval osveževanja grafa (ms)
-SIM_OSVEZI_MS = 30              # Interval posodabljanja sim platna (ms)
+PLATNO_GRAF_VELIKOST = 450  # Širina/višina grafičnega platna (px)
+SEZNAM_AGENTOV_VISINA = 120  # Višina scrollable področja agentov (px)
+PRIVZETA_HITROST_SIM = "0.1"  # Privzeta hitrost simulacije (s)
+PRIVZETA_HITROST_GRAF = "0.5"  # Privzeto osveževanje grafa (s)
+GRAF_OSVEZI_MIN_MS = 50  # Minimalni interval osveževanja grafa (ms)
+GRAF_OSVEZI_FALLBACK_MS = 500  # Fallback interval osveževanja grafa (ms)
+SIM_OSVEZI_MS = 30  # Interval posodabljanja sim platna (ms)
 
 # Privzete vrednosti parametrov agenta
 PRIVZETI_N0 = "50"
@@ -397,6 +397,9 @@ class EvolucijskaSimulacija(tk.Tk):
         self.ctrl_fm = tk.LabelFrame(root_fm, text=" Nadzor simulacije ", padx=10, pady=10)
         self.ctrl_fm.pack(side=tk.BOTTOM, fill=tk.X, pady=10)
 
+        # self.lbl_info = tk.Label(self.ctrl_fm, text="Populacija: 0", font=("Arial", 10, "bold"))
+        # self.lbl_info.pack(anchor="e", pady=(0, 5))
+
         self._zgradi_gumbe()
         self._zgradi_seznam_agentov()
 
@@ -550,7 +553,7 @@ class EvolucijskaSimulacija(tk.Tk):
 
     def _posodobi_stevec_populacije(self):
         skupaj = sum(h[-1][1] for h in self.zgodovine.values() if h)
-        self.lbl_info.config(text=f"Skupna populacija: {skupaj}")
+        self.lbl_info.config(text=f"Populacija: {skupaj}")
 
     def toggle_pause(self):
         je_pavzirano = any(t.paused for t in self.niti.values())
@@ -582,6 +585,7 @@ class EvolucijskaSimulacija(tk.Tk):
         self.platno_graf._narisi_osi()
 
         self._nastavi_predvajanje_ui(False)
+
 
 if __name__ == "__main__":
     app = EvolucijskaSimulacija()
