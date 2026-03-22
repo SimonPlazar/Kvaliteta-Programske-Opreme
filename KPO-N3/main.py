@@ -87,13 +87,14 @@ class Agent:
 
     @property
     def radius(self):
-        return AGENT_R_BASE * self.size_trait
+        # Base size + 1px per integer step of size_trait
+        return AGENT_R_BASE + int(self.size_trait - 1.0)
 
-    def mutate(self):
+    def mutate(self, mut_prob=0.3):
         """Return a new agent with slightly mutated traits."""
         # Mutation factor: +/- 10%
         def mutate_val(v):
-            if random.random() < 0.3: # 30% chance to mutate a trait
+            if random.random() < mut_prob: 
                 return v * random.uniform(0.9, 1.1)
             return v
             
@@ -212,14 +213,19 @@ class SimThread(threading.Thread):
 
     def run(self):
         # Create initial population
-        self.agents = [
-            Agent(*_random_border_point(SIM_SIZE, BORDER_W),
-                  self.init_params['speed'],
-                  self.init_params['size'],
-                  self.init_params['sense'],
-                  self.init_params['energy'])
-            for _ in range(self.n_agents)
-        ]
+        self.agents = []
+        base_size = self.init_params['size']
+        
+        for _ in range(self.n_agents):
+            # Randomize initial size: base +/- 0.5
+            s_val = max(0.1, base_size + random.uniform(-0.5, 0.5))
+            
+            ag = Agent(*_random_border_point(SIM_SIZE, BORDER_W),
+                    self.init_params['speed'],
+                    s_val,
+                    self.init_params['sense'],
+                    self.init_params['energy'])
+            self.agents.append(ag)
 
         while self._running:
             self._paused.wait()
@@ -377,14 +383,12 @@ class SimThread(threading.Thread):
 
             # Check if entering safe zone
             if ag.check_border(BORDER_W, SIM_SIZE):
+                # If no food, border doesn't save you yet
                 if ag.food_eaten > 0:
                     ag.safe = True
                     ag.color = COLOR_AGENT_SAFE
                     continue
-                # If no food, border doesn't save you yet (sim rule says "must find at least one food ... and return")
-                # But typically they start at border. We assume once they leave they must eat.
-                # Simplification: If they are at border and haven't eaten, they are just loitering.
-            
+
             ag.move(dx, dy, move_speed)
             
             # Interactions
@@ -427,7 +431,7 @@ class SimThread(threading.Thread):
                 
                 # Reproduce if 2+ food
                 if ag.food_eaten >= 2:
-                    child = ag.mutate()
+                    child = ag.mutate(self.init_params.get('mut_prob', 0.3))
                     child.x, child.y = ag.x, ag.y
                     offspring.append(child)
         
@@ -459,8 +463,8 @@ class SimThread(threading.Thread):
             'phase':      self.phase,
             'phase_name': PHASE_NAMES.get(self.phase, ''),
             'generation': self.generation,
-            # Schema: x, y, radius, color, alive
-            'agents':     [(ag.x, ag.y, ag.radius, ag.color, ag.alive) for ag in self.agents],
+            # Schema: x, y, radius, color, alive, sense, energy, max_energy
+            'agents':     [(ag.x, ag.y, ag.radius, ag.color, ag.alive, ag.sense_trait, ag.energy, ag.energy_cap) for ag in self.agents],
             'food':       [(f.x, f.y) for f in self.food],
             'history':    list(self.history),
             'active_cnt': sum(1 for a in self.agents if a.alive and not a.safe)
@@ -471,32 +475,6 @@ class SimThread(threading.Thread):
 # ─────────────────────────────────────────────────────────────────────────────
 # 4.  UI COMPONENTS
 # ─────────────────────────────────────────────────────────────────────────────
-
-class AgentRow(tk.Frame):
-    """Settings row for one agent type (M or A). Fixed – no delete button."""
-
-    def __init__(self, parent, kind: str, color: str, default_n0: str):
-        super().__init__(parent, bd=1, relief=tk.GROOVE, pady=3)
-        self.kind = kind
-        self.pack(fill=tk.X, pady=1)
-
-        tk.Label(self, bg=color, width=2).pack(side=tk.LEFT, padx=(3, 5))
-        label = "Peaceful (M)" if kind == 'M' else "Aggressive (A)"
-        tk.Label(self, text=label, font=("Arial", 8, "bold"), width=14, anchor='w').pack(side=tk.LEFT)
-        tk.Label(self, text="N0:", font=("Arial", 8)).pack(side=tk.LEFT, padx=(8, 1))
-        self.ent_n0 = tk.Entry(self, width=6, font=("Arial", 8))
-        self.ent_n0.insert(0, default_n0)
-        self.ent_n0.pack(side=tk.LEFT)
-
-    def get_n0(self) -> int:
-        try:
-            return max(0, int(self.ent_n0.get()))
-        except ValueError:
-            return 0
-
-    def set_enabled(self, enabled: bool):
-        self.ent_n0.config(state=tk.NORMAL if enabled else tk.DISABLED)
-
 
 class Chart(tk.Canvas):
     """
@@ -769,6 +747,10 @@ class App(tk.Tk):
         cb = tk.Checkbutton(row1, text="Decrease Food (-1/gen)", variable=self.var_decreasing)
         cb.pack(side=tk.LEFT, padx=20, pady=10)
 
+        self.var_debug = tk.BooleanVar(value=False)
+        cb_debug = tk.Checkbutton(row1, text="Debug View", variable=self.var_debug)
+        cb_debug.pack(side=tk.LEFT, padx=10, pady=10)
+
         # Row 2: Traits
         row2 = tk.Frame(outer)
         row2.pack(fill=tk.X, pady=2)
@@ -777,6 +759,7 @@ class App(tk.Tk):
         self.p_size   = ParamEntry(row2, "Base Size", DEFAULT_SIZE)
         self.p_sense  = ParamEntry(row2, "Base Sense", DEFAULT_SENSE)
         self.p_energy = ParamEntry(row2, "Base Energy", DEFAULT_E_CAP)
+        self.p_mut_prob = ParamEntry(row2, "Mut. Chance", "0.3")
 
     # ── simulation control ────────────────────────────────────────────────────
 
@@ -793,7 +776,7 @@ class App(tk.Tk):
             self.btn_restart.config(state=tk.DISABLED)
             
         for p in [self.p_nagents, self.p_nfood, self.p_speed, 
-                  self.p_size, self.p_sense, self.p_energy]:
+                  self.p_size, self.p_sense, self.p_energy, self.p_mut_prob]:
              p.set_state(state)
 
     def start(self):
@@ -806,7 +789,8 @@ class App(tk.Tk):
                 'speed': float(self.p_speed.get()),
                 'size':  float(self.p_size.get()),
                 'sense': float(self.p_sense.get()),
-                'energy': float(self.p_energy.get())
+                'energy': float(self.p_energy.get()),
+                'mut_prob': float(self.p_mut_prob.get())
             }
         except ValueError:
             print("Invalid input")
@@ -883,13 +867,35 @@ class App(tk.Tk):
                                         fill=COLOR_FOOD, outline="#1a8a4a",
                                         width=1, tags="food")
 
-        # Agents: x, y, radius, color, alive
+        # Agents: x, y, radius, color, alive, sense, energy, max_energy
         # Only draw living or recently dead?
         # Draw dead as grey, alive as colored
-        for ax, ay, ar, col, alive in payload['agents']:
+        debug_mode = self.var_debug.get()
+        self.sim_canvas.delete("debug") # clear old debug items if any
+
+        for ax, ay, ar, col, alive, sense, energy, max_e in payload['agents']:
             # Visual Z-order: larger on top or bottom? Smaller on top is better to see them.
             # But usually sorting by size helps.
             # Just draw simply.
+            if debug_mode and alive:
+                # Sense range
+                self.sim_canvas.create_oval(ax - sense, ay - sense, ax + sense, ay + sense,
+                                            outline="#444444", width=1, dash=(2, 4), tags="debug")
+                
+                # Energy bar
+                bar_w = 20
+                bar_h = 3
+                pct = max(0, min(1, energy / max_e))
+                # color from green to red based on pct
+                r = int(255 * (1 - pct))
+                g = int(255 * pct)
+                ecol = f'#{r:02x}{g:02x}00'
+                
+                bx = ax - bar_w / 2
+                by = ay - ar - 8
+                self.sim_canvas.create_rectangle(bx, by, bx + bar_w * pct, by + bar_h,
+                                                 fill=ecol, outline="", tags="debug")
+
             self.sim_canvas.create_oval(ax - ar, ay - ar, ax + ar, ay + ar,
                                         fill=col, outline="black",
                                         width=1,
