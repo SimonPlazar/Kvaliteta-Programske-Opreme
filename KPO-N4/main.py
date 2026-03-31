@@ -5,13 +5,16 @@ from collections import deque
 import time
 import random
 import math
+import glob
+import os
+import json
 from terrain_builder import generate_terrain_grid
 
 # ── colours ──────────────────────────────────────────────────────────────────
 COLOR_AGENT = "#3a7bd5"
 COLOR_AGENT_DEAD = "#555555"
 COLOR_AGENT_PRED = "#e03131"
-COLOR_AGENT_PREY = "#88cc88"
+COLOR_AGENT_PREY = "#dcdcdc"
 COLOR_AGENT_FOOD = "#2ecc71"
 COLOR_BORDER = "#cccccc"
 
@@ -34,7 +37,7 @@ DEFAULT_MUT_PROB = "0.1"
 DEFAULT_MUT_STR = "0.2"
 
 DEFAULT_SIM_SPEED = "0.01"
-SIM_REFRESH_MS = 30
+DEFAULT_UI_REFRESH_MS = "60"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -56,20 +59,25 @@ class Terrain:
         5: {"walkable": False, "speed_mod": 0.0, "thirst_mod": 1.0, "hunger_mod": 1.0, "color": "#fdfefe", "name": "Peak"}
     }
 
-    def __init__(self, width, height, cell_size=CELL_SIZE):
+    def __init__(self, width, height, cell_size=CELL_SIZE, terrain_file=None):
         self.width = width
         self.height = height
         self.cell_size = cell_size
         self.cols = width // cell_size
         self.rows = height // cell_size
         
-        seed = random.randint(0, 999999)
-        raw_grid = generate_terrain_grid(
-            width, height, cell_size, seed, scale=50, octaves=4,
-            t_water=0.40, t_sand=0.425, t_grass=0.775, t_forest=0.925, t_mount=0.975
-        )
-        
-        self.grid = [[cell["t"] for cell in row] for row in raw_grid]
+        if terrain_file and terrain_file != "Random Generate":
+            with open(terrain_file, "r") as f:
+                data = json.load(f)
+                grid_data = data["grid"]
+                self.grid = [[cell["t"] for cell in row] for row in grid_data]
+        else:
+            seed = random.randint(0, 999999)
+            raw_grid = generate_terrain_grid(
+                width, height, cell_size, seed, scale=50, octaves=4,
+                t_water=0.40, t_sand=0.425, t_grass=0.775, t_forest=0.925, t_mount=0.975
+            )
+            self.grid = [[cell["t"] for cell in row] for row in raw_grid]
         
         self._compute_water_distance()
 
@@ -699,7 +707,7 @@ class Clover(Agent):
 
 class SimThread(threading.Thread):
     def __init__(self, data_queue: queue.Queue, n_prey: int, n_pred: int, n_food: int, init_params: dict,
-                 speed_entry: tk.Entry):
+                 speed_entry: tk.Entry, terrain_file: str = None):
         super().__init__(daemon=True)
         self.q = data_queue
         self.n_prey = n_prey
@@ -712,10 +720,11 @@ class SimThread(threading.Thread):
         self._paused = threading.Event()
         self._paused.set()
 
-        self.terrain = Terrain(SIM_WIDTH, SIM_HEIGHT)
+        self.terrain = Terrain(SIM_WIDTH, SIM_HEIGHT, CELL_SIZE, terrain_file)
         self.spatial_grid = SpatialGrid(100)
         self.agents: list[Agent] = []
         self.ticks = 0
+        self.dropped_frames = 0
 
     def stop(self):
         self._running = False
@@ -806,7 +815,7 @@ class SimThread(threading.Thread):
     def _send_payload(self):
         payload = {
             'ticks': self.ticks,
-            # Terrena ne pošiljamo več, ker ga app izkicli iz generatorja v draw root
+            'dropped_frames': self.dropped_frames,
             'agents': [(
                 ag.id, ag.x, ag.y, ag.radius, ag.color, ag.alive, ag.sense, ag.current_action,
                 ag.hunger, ag.thirst, ag.cls_name
@@ -816,15 +825,11 @@ class SimThread(threading.Thread):
             'pred_cnt': sum(1 for a in self.agents if a.cls_name == "Predator"),
             'clover_cnt': sum(1 for a in self.agents if a.is_plant)
         }
-        if self.q.qsize() < QUEUE_MAX:
-            self.q.put(payload)
-        else:
-            # Drop older frames to keep the queue small and UI responsive
-            try:
-                self.q.get_nowait()
-                self.q.put(payload)
-            except queue.Empty:
-                pass
+        
+        try:
+            self.q.put_nowait(payload)
+        except queue.Full:
+            self.dropped_frames += 1
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -854,7 +859,7 @@ class App(tk.Tk):
         self.title("EcoSim MVP - Optimizirano")
 
         self.sim = None
-        self.q = queue.Queue()
+        self.q = queue.Queue(maxsize=2)  # Limited queue ensures sim thread is completely decoupled
         self._restarted = False
         self._last_payload = None
 
@@ -887,7 +892,7 @@ class App(tk.Tk):
         self._build_buttons()
         self._build_settings()
 
-        self.lbl_info = tk.Label(root, text="Ticks: 0 | Skupaj: 0 | Plen: 0 | Plenilci: 0 | Detelja: 0",
+        self.lbl_info = tk.Label(root, text="Ticks: 0 | Skupaj: 0 | Plen: 0 | Plenilci: 0 | Detelja: 0 | Dropped: 0",
                                  font=("Arial", 9, "bold"))
         self.lbl_info.pack(side=tk.BOTTOM, anchor="e")
 
@@ -909,6 +914,11 @@ class App(tk.Tk):
         self.ent_speed = tk.Entry(bar, width=6)
         self.ent_speed.insert(0, DEFAULT_SIM_SPEED)
         self.ent_speed.pack(side=tk.LEFT)
+
+        tk.Label(bar, text="UI Osveževanje (ms):").pack(side=tk.LEFT, padx=(20, 2))
+        self.ent_refresh = tk.Entry(bar, width=6)
+        self.ent_refresh.insert(0, DEFAULT_UI_REFRESH_MS)
+        self.ent_refresh.pack(side=tk.LEFT)
 
         self.var_debug = tk.BooleanVar(value=True)
         tk.Checkbutton(
@@ -934,6 +944,18 @@ class App(tk.Tk):
 
         self.p_mut_prob = ParamEntry(row1, "Verjetnost mut.\n(npr. 0.1)", DEFAULT_MUT_PROB, width=6)
         self.p_mut_str = ParamEntry(row1, "Moč mutacije\n(npr. 0.2)", DEFAULT_MUT_STR, width=6)
+
+        row2 = tk.Frame(outer)
+        row2.pack(fill=tk.X, pady=5)
+        
+        tk.Label(row2, text="Izbira podlage (Teren):").pack(side=tk.LEFT, padx=(5, 10))
+        
+        terrain_files = glob.glob(os.path.join("terrains", "*.json"))
+        terrain_opts = ["Random Generate"] + terrain_files
+        
+        self.var_terrain = tk.StringVar(value="Random Generate")
+        self.opt_terrain = tk.OptionMenu(row2, self.var_terrain, *terrain_opts)
+        self.opt_terrain.pack(side=tk.LEFT)
 
     def _on_drag_start(self, event):
         self._drag_start_x = event.x
@@ -980,13 +1002,17 @@ class App(tk.Tk):
             print("Neveljavni podatki!")
             return
 
+        terrain_file = getattr(self, 'var_terrain', None)
+        selected_terrain = terrain_file.get() if terrain_file else "Random Generate"
+
         self.sim = SimThread(
             data_queue=self.q,
             n_prey=n_prey,
             n_pred=n_pred,
             n_food=n_food,
             init_params=init_params,
-            speed_entry=self.ent_speed
+            speed_entry=self.ent_speed,
+            terrain_file=selected_terrain
         )
         self.sim.start()
         self._set_ui_running(True)
@@ -1017,7 +1043,7 @@ class App(tk.Tk):
         self.sim_canvas.delete("all")
         self._agent_graphics.clear()
         self._terrain_drawn = False # Reset za ponoven izris terena
-        self.lbl_info.config(text="Ticks: 0 | Skupaj: 0 | Plen: 0 | Plenilci: 0 | Detelja: 0")
+        self.lbl_info.config(text="Ticks: 0 | Skupaj: 0 | Plen: 0 | Plenilci: 0 | Detelja: 0 | Dropped: 0")
         self._set_ui_running(False)
 
     def _poll_queue(self):
@@ -1037,7 +1063,13 @@ class App(tk.Tk):
             self._draw_sim(latest)
             self._update_info(latest)
 
-        self.after(SIM_REFRESH_MS, self._poll_queue)
+        try:
+            refresh_ms = int(self.ent_refresh.get())
+            if refresh_ms < 10: refresh_ms = 10
+        except ValueError:
+            refresh_ms = int(DEFAULT_UI_REFRESH_MS)
+
+        self.after(refresh_ms, self._poll_queue)
 
     def _draw_sim(self, payload: dict):
         px, py = self.pan_x, self.pan_y
@@ -1099,6 +1131,7 @@ class App(tk.Tk):
                 g['text'] = self.sim_canvas.create_text(0, 0, text="", fill="#f1c40f", font=("Arial", 8, "bold"), state=tk.HIDDEN)
                 # Telo naj bo vedno na vrhu (narisano nazadnje v zanki kreacije)
                 g['body'] = self.sim_canvas.create_oval(0, 0, 0, 0, fill=col, outline="black", width=1)
+                g['debug_visible'] = False
                 self._agent_graphics[ag_id] = g
 
             g = self._agent_graphics[ag_id]
@@ -1108,31 +1141,37 @@ class App(tk.Tk):
 
             # Upravljanje vidnosti in animacije Debug elementov
             if debug and cls_name != "Clover":
-                self.sim_canvas.itemconfig(g['sight'], state=tk.NORMAL)
+                if not g['debug_visible']:
+                    self.sim_canvas.itemconfig(g['sight'], state=tk.NORMAL)
+                    self.sim_canvas.itemconfig(g['hp_bg'], state=tk.NORMAL)
+                    self.sim_canvas.itemconfig(g['hp_fg'], state=tk.NORMAL)
+                    self.sim_canvas.itemconfig(g['tp_bg'], state=tk.NORMAL)
+                    self.sim_canvas.itemconfig(g['tp_fg'], state=tk.NORMAL)
+                    self.sim_canvas.itemconfig(g['text'], state=tk.NORMAL)
+                    g['debug_visible'] = True
+                    
                 self.sim_canvas.coords(g['sight'], cx - sense, cy - sense, cx + sense, cy + sense)
                 
                 bar_w = 16
                 hp = min(1.0, hunger / 100.0)
-                self.sim_canvas.itemconfig(g['hp_bg'], state=tk.NORMAL)
                 self.sim_canvas.coords(g['hp_bg'], cx - bar_w / 2, cy - ar - 14, cx + bar_w / 2, cy - ar - 11)
-                self.sim_canvas.itemconfig(g['hp_fg'], state=tk.NORMAL)
                 self.sim_canvas.coords(g['hp_fg'], cx - bar_w / 2, cy - ar - 14, cx - bar_w / 2 + bar_w * hp, cy - ar - 11)
 
                 tp = min(1.0, thirst / 100.0)
-                self.sim_canvas.itemconfig(g['tp_bg'], state=tk.NORMAL)
                 self.sim_canvas.coords(g['tp_bg'], cx - bar_w / 2, cy - ar - 10, cx + bar_w / 2, cy - ar - 7)
-                self.sim_canvas.itemconfig(g['tp_fg'], state=tk.NORMAL)
                 self.sim_canvas.coords(g['tp_fg'], cx - bar_w / 2, cy - ar - 10, cx - bar_w / 2 + bar_w * tp, cy - ar - 7)
 
-                self.sim_canvas.itemconfig(g['text'], state=tk.NORMAL, text=f"{action}")
+                self.sim_canvas.itemconfig(g['text'], text=action)
                 self.sim_canvas.coords(g['text'], cx, cy - ar - 22)
             else:
-                self.sim_canvas.itemconfig(g['sight'], state=tk.HIDDEN)
-                self.sim_canvas.itemconfig(g['hp_bg'], state=tk.HIDDEN)
-                self.sim_canvas.itemconfig(g['hp_fg'], state=tk.HIDDEN)
-                self.sim_canvas.itemconfig(g['tp_bg'], state=tk.HIDDEN)
-                self.sim_canvas.itemconfig(g['tp_fg'], state=tk.HIDDEN)
-                self.sim_canvas.itemconfig(g['text'], state=tk.HIDDEN)
+                if g['debug_visible']:
+                    self.sim_canvas.itemconfig(g['sight'], state=tk.HIDDEN)
+                    self.sim_canvas.itemconfig(g['hp_bg'], state=tk.HIDDEN)
+                    self.sim_canvas.itemconfig(g['hp_fg'], state=tk.HIDDEN)
+                    self.sim_canvas.itemconfig(g['tp_bg'], state=tk.HIDDEN)
+                    self.sim_canvas.itemconfig(g['tp_fg'], state=tk.HIDDEN)
+                    self.sim_canvas.itemconfig(g['text'], state=tk.HIDDEN)
+                    g['debug_visible'] = False
 
         # Odstrani in počisti narisane komponente za mrtve agente
         dead_ids = []
@@ -1152,8 +1191,9 @@ class App(tk.Tk):
         pred_cnt = payload.get('pred_cnt', 0)
         clover_cnt = payload.get('clover_cnt', 0)
         ticks = payload.get('ticks', 0)
+        dropped = payload.get('dropped_frames', 0)
         self.lbl_info.config(
-            text=f"Tiki: {ticks} | Skupaj: {active_cnt} | Zajci: {prey_cnt} | Lisice: {pred_cnt} | Detelja: {clover_cnt}")
+            text=f"Tiki: {ticks} | Skupaj: {active_cnt} | Zajci: {prey_cnt} | Lisice: {pred_cnt} | Detelja: {clover_cnt} | Dropped: {dropped}")
 
 
 if __name__ == "__main__":
