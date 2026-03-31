@@ -1177,8 +1177,9 @@ class App(tk.Tk):
         dead_ids = []
         for ag_id, g in self._agent_graphics.items():
             if ag_id not in current_ids:
-                for item in g.values():
-                    self.sim_canvas.delete(item)
+                for key, item in g.items():
+                    if key != 'debug_visible':
+                        self.sim_canvas.delete(item)
                 dead_ids.append(ag_id)
         
         for dead in dead_ids:
