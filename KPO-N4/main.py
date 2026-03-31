@@ -80,6 +80,10 @@ class Agent:
     BASE_THIRST_RATE = 0.05
     SPEED_THIRST_FACTOR = 0.05
     SIZE_HUNGER_FACTOR = 1.0
+    BASE_REPRO_RATE = 0.005
+    REPRO_COST_HUNGER = 30
+    REPRO_COST_THIRST = 30
+    REPRO_COOLDOWN = -30
     # ──────────────────────────────────────────────────────────
 
     def __init__(self, x: float, y: float, speed: float, size: float, sense: float):
@@ -122,16 +126,42 @@ class Agent:
             self.hunger = 100
             self.thirst += self.BASE_THIRST_RATE * 2 # Hitrejša dehidracija ob stradanju
 
-        self.reproductive_urge += 0.005
+        # Adaptiven reproductive urge: Hitrejši, če je agent bolj sit in odžejan
+        health_factor = max(0, 1.0 - (self.hunger + self.thirst) / 200.0) 
+        # health_factor bo blizu 1.0, če je skoraj sit/odžejan in 0, če strada.
+        self.reproductive_urge += self.BASE_REPRO_RATE * (0.5 + health_factor)
 
         if self.thirst >= 100 or self.age > self.max_age:
             self.alive = False
 
+    def mix_genes(self, partner):
+        speed = (self.speed + partner.speed) / 2.0
+        size  = (self.size + partner.size) / 2.0
+        sense = (self.sense + partner.sense) / 2.0
+
+        # Osnovna variacija (+/- 10%)
+        speed *= random.uniform(0.9, 1.1)
+        size  *= random.uniform(0.9, 1.1)
+        sense *= random.uniform(0.9, 1.1)
+
+        # Mutacija (10% možnost za +/- 20% skok)
+        if random.random() < 0.10: speed *= random.choice([0.8, 1.2])
+        if random.random() < 0.10: size  *= random.choice([0.8, 1.2])
+        if random.random() < 0.10: sense *= random.choice([0.8, 1.2])
+
+        return type(self)(self.x, self.y, max(0.5, speed), max(0.2, size), max(20.0, sense))
+
     def get_priority(self):
-        # Začnejo iskati rešitve preden so na robu smrti
-        if self.reproductive_urge > 95:
+        # Preprečevanje "tunnel vision" - nujno preživetje povozijo reprodukcijo
+        if self.thirst > 75:
+            return "Thirst"
+        elif self.hunger > 75:
+            return "Hunger"
+            
+        if self.reproductive_urge >= 100 and self.hunger < 40 and self.thirst < 40:
             return "Reproduction"
-        elif self.thirst > 40:
+            
+        if self.thirst > 40:
             return "Thirst"
         elif self.hunger > 40:
             return "Hunger"
@@ -153,20 +183,22 @@ class Agent:
         if hit_wall:
             self.wander_angle += math.pi
 
-            # Trk z vodo (Agent ne more plavati)
-        if type(self).__name__ != "Clover": # Detelja ignorira trk, saj se spawna na robu
-            for wx, wy, wr in terrain.water_bodies:
-                dx = self.x - wx
-                dy = self.y - wy
-                dist_sq = dx*dx + dy*dy
-                min_dist = wr + self.radius
+        # Trk z vodo (Agent ne more plavati, detelja ne more rasti na vodi)
+        # Type check izboljšan
+        for wx, wy, wr in terrain.water_bodies:
+            dx = self.x - wx
+            dy = self.y - wy
+            dist_sq = dx*dx + dy*dy
+            min_dist = wr + self.radius
 
-                if dist_sq < min_dist * min_dist:
-                    dist = math.sqrt(dist_sq)
-                    if dist == 0: dist = 0.1
-                    overlap = min_dist - dist
-                    self.x += (dx / dist) * overlap
-                    self.y += (dy / dist) * overlap
+            if dist_sq < min_dist * min_dist:
+                dist = math.sqrt(dist_sq)
+                if dist == 0: dist = 0.1
+                overlap = min_dist - dist
+                self.x += (dx / dist) * overlap
+                self.y += (dy / dist) * overlap
+                # Detelja ne tava, jo samo odrine na obalo. Prepreči pojavljanje v vodi.
+                if not isinstance(self, Clover):
                     self.wander_angle += math.pi
 
     def move_towards(self, tx, ty, speed_limit, terrain):
@@ -193,13 +225,17 @@ class Prey(Agent):
     BASE_THIRST_RATE = 0.15     # Visoka poraba vode (vezanost na vodo)
     SPEED_THIRST_FACTOR = 0.08  # Bežanje hitro utrudi in ožeja
     SIZE_HUNGER_FACTOR = 1.0
+    BASE_REPRO_RATE = 0.4
+    REPRO_COST_HUNGER = 30
+    REPRO_COST_THIRST = 30
+    REPRO_COOLDOWN = -30
     # ──────────────────────────────────────────────────────────
 
     def __init__(self, x, y, speed, size, sense):
         super().__init__(x, y, speed, size, sense)
         self.color = COLOR_AGENT_SAFE
 
-    def act(self, terrain, spatial_grid):
+    def act(self, terrain, spatial_grid, new_agents):
         if not self.alive: return
 
         entities = spatial_grid.get_nearby(self.x, self.y, self.sense)
@@ -237,9 +273,34 @@ class Prey(Agent):
         pri = self.get_priority()
 
         if pri == "Reproduction":
-            self.current_action = "Reproduction"
-            self.reproductive_urge = 0
-            self.wander(terrain)
+            self.current_action = "Mate"
+            best_partner = None
+            min_dist_sq = float('inf')
+            
+            for e in entities:
+                if type(e) == type(self) and e.alive and e != self and e.sex != self.sex:
+                    if e.get_priority() == "Reproduction":
+                        d_sq = (e.x - self.x)**2 + (e.y - self.y)**2
+                        if d_sq < self.sense**2 and d_sq < min_dist_sq:
+                            min_dist_sq = d_sq
+                            best_partner = e
+
+            if best_partner:
+                dist = math.sqrt(min_dist_sq)
+                if dist < self.radius + best_partner.radius + 5:
+                    self.hunger += self.REPRO_COST_HUNGER
+                    self.thirst += self.REPRO_COST_THIRST
+                    self.reproductive_urge = self.REPRO_COOLDOWN
+                    
+                    best_partner.hunger += best_partner.REPRO_COST_HUNGER
+                    best_partner.thirst += best_partner.REPRO_COST_THIRST
+                    best_partner.reproductive_urge = best_partner.REPRO_COOLDOWN
+                    
+                    new_agents.append(self.mix_genes(best_partner))
+                else:
+                    self.move_towards(best_partner.x, best_partner.y, self.speed, terrain)
+            else:
+                self.wander(terrain)
 
         elif pri == "Thirst":
             self.current_action = "Thirst"
@@ -298,6 +359,10 @@ class Predator(Agent):
     BASE_THIRST_RATE = 0.01     # Zelo počasna poraba vode (nomad)
     SPEED_THIRST_FACTOR = 0.02
     SIZE_HUNGER_FACTOR = 1.2
+    BASE_REPRO_RATE = 0.15
+    REPRO_COST_HUNGER = 40
+    REPRO_COST_THIRST = 20
+    REPRO_COOLDOWN = -50
     # ──────────────────────────────────────────────────────────
 
     def __init__(self, x, y, speed, size, sense):
@@ -306,24 +371,55 @@ class Predator(Agent):
 
     def get_priority(self):
         # Prilagojene prioritete plenilca
-        if self.reproductive_urge > 95:
+        if self.thirst > 85:
+            return "Thirst"
+        elif self.hunger > 85:
+            return "Hunger"
+            
+        if self.reproductive_urge >= 100 and self.hunger < 50 and self.thirst < 50:
             return "Reproduction"
-        elif self.hunger > 30:     # Zelo hitro začne iskati hrano
+            
+        if self.hunger > 30:     # Zelo hitro začne iskati hrano
             return "Hunger"
         elif self.thirst > 80:     # Voda mu ni tako pomembna
             return "Thirst"
         return "Wander"
 
-    def act(self, terrain, spatial_grid):
+    def act(self, terrain, spatial_grid, new_agents):
         if not self.alive: return
         pri = self.get_priority()
         
         entities = spatial_grid.get_nearby(self.x, self.y, self.sense)
 
         if pri == "Reproduction":
-            self.current_action = "Reproduction"
-            self.reproductive_urge = 0
-            self.wander(terrain)
+            self.current_action = "Mate"
+            best_partner = None
+            min_dist_sq = float('inf')
+            
+            for e in entities:
+                if type(e) == type(self) and e.alive and e != self and e.sex != self.sex:
+                    if e.get_priority() == "Reproduction":
+                        d_sq = (e.x - self.x)**2 + (e.y - self.y)**2
+                        if d_sq < self.sense**2 and d_sq < min_dist_sq:
+                            min_dist_sq = d_sq
+                            best_partner = e
+
+            if best_partner:
+                dist = math.sqrt(min_dist_sq)
+                if dist < self.radius + best_partner.radius + 5:
+                    self.hunger += self.REPRO_COST_HUNGER
+                    self.thirst += self.REPRO_COST_THIRST
+                    self.reproductive_urge = self.REPRO_COOLDOWN
+                    
+                    best_partner.hunger += best_partner.REPRO_COST_HUNGER
+                    best_partner.thirst += best_partner.REPRO_COST_THIRST
+                    best_partner.reproductive_urge = best_partner.REPRO_COOLDOWN
+                    
+                    new_agents.append(self.mix_genes(best_partner))
+                else:
+                    self.move_towards(best_partner.x, best_partner.y, self.speed, terrain)
+            else:
+                self.wander(terrain)
 
         elif pri == "Thirst":
             self.current_action = "Thirst"
@@ -387,6 +483,7 @@ class Clover(Agent):
     BASE_THIRST_RATE = 0.8
     SPEED_THIRST_FACTOR = 0.0
     SIZE_HUNGER_FACTOR = 0.0
+    BASE_REPRO_RATE = 0.4
     # ──────────────────────────────────────────────────────────
 
     def __init__(self, x: float, y: float, terrain):
@@ -394,6 +491,9 @@ class Clover(Agent):
         self.color = COLOR_FOOD
         self.max_age = random.randint(1500, 3000)
         self.current_action = "Grow"
+        
+        # Randomizicija začetnega urge-a, da se ne razmnožijo na isti tick
+        self.reproductive_urge = random.uniform(0, 50)
 
         # Voda za deteljo se izračuna samo enkrat ob rojstvu (glede na razdaljo do vode)
         self.moisture_supply = 0.0
@@ -416,13 +516,32 @@ class Clover(Agent):
         # Detelja potrebuje vodo za preživetje in jo črpa glede na moisture_supply nastavljen ob rojstvu.
         # Če je supply manjši od THIRST_RATE, bo detelja počasi dehidrirala in umrla (Oddaljena od vode).
         self.thirst += self.BASE_THIRST_RATE - self.moisture_supply
+        
+        # Adaptiven urge glede na vodo (manj thirsta=hitreje)
+        health_factor = max(0, 1.0 - (self.thirst / 100.0))
+        self.reproductive_urge += self.BASE_REPRO_RATE * (0.2 + 1.5 * health_factor)
 
         if self.thirst >= 100 or self.age > self.max_age:
             self.alive = False
 
-    def act(self, terrain, entities):
-        # Detelja ne potrebuje več aktivnega preverjanja razdalje v vsakem tick-u (optimizacija).
-        pass
+    def act(self, terrain, spatial_grid, new_agents):
+        if not self.alive: return
+        if self.reproductive_urge >= 100:
+            # Ne razmnoži se, če bi jo to takoj ubilo (težava s sušo)
+            if self.thirst < 70:
+                self.reproductive_urge = 0 # reset po množenju
+                self.thirst += 30
+                # Aseksualno širjenje v bližini
+                angle = random.uniform(0, 2 * math.pi)
+                dist = random.uniform(20, 40)
+                nx = max(0, min(SIM_WIDTH, self.x + math.cos(angle) * dist))
+                ny = max(0, min(SIM_HEIGHT, self.y + math.sin(angle) * dist))
+                
+                new_clover = Clover(nx, ny, terrain)
+                new_clover._clamp_pos(terrain) # Preprečitev, da bi bla v vodi ali out of bounds
+                new_agents.append(new_clover)
+            else:
+                self.reproductive_urge = 100 # Čaka
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 3.  SIMULATION ENGINE
@@ -515,16 +634,21 @@ class SimThread(threading.Thread):
         for ag in self.agents:
             self.spatial_grid.insert(ag)
             
+        new_agents = []
         for ag in self.agents:
             if ag.alive:
                 ag.update_needs()
-                ag.act(self.terrain, self.spatial_grid if not isinstance(ag, Clover) else self.agents)
+                if isinstance(ag, Clover):
+                    ag.act(self.terrain, None, new_agents)
+                else:
+                    ag.act(self.terrain, self.spatial_grid, new_agents)
 
+        self.agents.extend(new_agents)
         self.agents = [a for a in self.agents if a.alive]
 
-        food_count = sum(1 for a in self.agents if isinstance(a, Clover))
-        if self.ticks % 20 == 0 and food_count < self.n_food:
-            self.agents.append(self._spawn_clover())
+        # Naključni "Spore" Spawn: Zelo majhna verjetnost za kolonizacijo naključne suhe lokacije
+        if random.random() < 0.005: # pribl. 1 na 200 tickov 
+            self.agents.append(Clover(random.uniform(10, SIM_WIDTH-10), random.uniform(10, SIM_HEIGHT-10), self.terrain))
 
     def _send_payload(self):
         payload = {
