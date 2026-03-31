@@ -1,15 +1,21 @@
 import tkinter as tk
 import threading
 import queue
+from collections import deque
 import time
 import random
 import math
+import glob
+import os
+import json
+from terrain_builder import generate_terrain_grid
 
 # ── colours ──────────────────────────────────────────────────────────────────
 COLOR_AGENT = "#3a7bd5"
-COLOR_AGENT_SAFE = "#88cc88"
 COLOR_AGENT_DEAD = "#555555"
-COLOR_FOOD = "#2ecc71"
+COLOR_AGENT_PRED = "#e03131"
+COLOR_AGENT_PREY = "#dcdcdc"
+COLOR_AGENT_FOOD = "#2ecc71"
 COLOR_BORDER = "#cccccc"
 
 # ── canvas / agent geometry ───────────────────────────────────────────────────
@@ -17,6 +23,7 @@ SIM_WIDTH = 1200
 SIM_HEIGHT = 420
 AGENT_R_BASE = 4
 FOOD_R = 3
+CELL_SIZE = 10  # Velikost mrežne celice za teren
 
 # ── simulation ────────────────────────────────────────────────────────────────
 QUEUE_MAX = 100
@@ -30,7 +37,7 @@ DEFAULT_MUT_PROB = "0.1"
 DEFAULT_MUT_STR = "0.2"
 
 DEFAULT_SIM_SPEED = "0.01"
-SIM_REFRESH_MS = 30
+DEFAULT_UI_REFRESH_MS = "60"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -38,14 +45,87 @@ SIM_REFRESH_MS = 30
 # ─────────────────────────────────────────────────────────────────────────────
 
 class Terrain:
-    def __init__(self, width, height):
+    # Definicija lastnosti unikatnih vrst terena:
+    # walkable: ali lahko agent stopi nanj
+    # speed_mod: faktor hitrosti premikanja
+    # thirst_mod: faktor hitrosti dehidracije (npr. puščava/pesek hitreje)
+    # hunger_mod: faktor hitrosti pojavljanja lakote
+    TERRAIN_PROPS = {
+        0: {"walkable": False, "speed_mod": 0.0, "thirst_mod": 1.0, "hunger_mod": 1.0, "color": "#2196f3", "name": "Water"},
+        1: {"walkable": True,  "speed_mod": 0.8, "thirst_mod": 1.5, "hunger_mod": 1.0, "color": "#f4d03f", "name": "Sand"},
+        2: {"walkable": True,  "speed_mod": 1.0, "thirst_mod": 1.0, "hunger_mod": 1.0, "color": "#2ecc71", "name": "Grass"},
+        3: {"walkable": True,  "speed_mod": 0.7, "thirst_mod": 0.8, "hunger_mod": 0.8, "color": "#1b5e20", "name": "Forest"},
+        4: {"walkable": True,  "speed_mod": 0.5, "thirst_mod": 1.2, "hunger_mod": 1.2, "color": "#795548", "name": "Mountain"},
+        5: {"walkable": False, "speed_mod": 0.0, "thirst_mod": 1.0, "hunger_mod": 1.0, "color": "#fdfefe", "name": "Peak"}
+    }
+
+    def __init__(self, width, height, cell_size=CELL_SIZE, terrain_file=None):
         self.width = width
         self.height = height
-        self.water_bodies = [
-            (300, 200, 60),
-            (850, 150, 70),
-            (600, 380, 50),
-        ]
+        self.cell_size = cell_size
+        self.cols = width // cell_size
+        self.rows = height // cell_size
+        
+        if terrain_file and terrain_file != "Random Generate":
+            with open(terrain_file, "r") as f:
+                data = json.load(f)
+                grid_data = data["grid"]
+                self.grid = [[cell["t"] for cell in row] for row in grid_data]
+        else:
+            seed = random.randint(0, 999999)
+            raw_grid = generate_terrain_grid(
+                width, height, cell_size, seed, scale=50, octaves=4,
+                t_water=0.40, t_sand=0.425, t_grass=0.775, t_forest=0.925, t_mount=0.975
+            )
+            self.grid = [[cell["t"] for cell in row] for row in raw_grid]
+        
+        self._compute_water_distance()
+
+    def _compute_water_distance(self):
+        """ BFS algoritem, ki izracuna zračno razdaljo in KOORDINATE najblizje vöde (O(1) lookupi za preživetje in rastline) """
+        self.water_dist = [[float('inf') for _ in range(self.cols)] for _ in range(self.rows)]
+        self.nearest_water = [[None for _ in range(self.cols)] for _ in range(self.rows)]
+        q = deque()  # deque je bistveno hitrejši od queue.Queue za BFS
+        
+        # Dodaj vse vodne celice v vrsto
+        for y in range(self.rows):
+            for x in range(self.cols):
+                if self.grid[y][x] == 0:
+                    self.water_dist[y][x] = 0
+                    self.nearest_water[y][x] = (x * self.cell_size + self.cell_size / 2, y * self.cell_size + self.cell_size / 2)
+                    q.append((x, y))
+                    
+        # BFS razsirjanje
+        dirs = [ (1,0), (-1,0), (0,1), (0,-1) ]
+        while q:
+            x, y = q.popleft()
+            d = self.water_dist[y][x]
+            n_water = self.nearest_water[y][x]
+            
+            for dx, dy in dirs:
+                nx, ny = x + dx, y + dy
+                if 0 <= nx < self.cols and 0 <= ny < self.rows:
+                    if self.water_dist[ny][nx] > d + 1:
+                        self.water_dist[ny][nx] = d + 1
+                        self.nearest_water[ny][nx] = n_water
+                        q.append((nx, ny))
+
+    def get_cell_coords(self, x, y):
+        cx = int(x / self.cell_size)
+        cy = int(y / self.cell_size)
+        return max(0, min(self.cols - 1, cx)), max(0, min(self.rows - 1, cy))
+
+    def get_type_at(self, x, y):
+        cx, cy = self.get_cell_coords(x, y)
+        return self.grid[cy][cx]
+
+    def get_props_at(self, x, y):
+        return self.TERRAIN_PROPS[self.get_type_at(x, y)]
+
+    def get_water_dist_at(self, x, y):
+        cx, cy = self.get_cell_coords(x, y)
+        # Pretvorba vdejanskih pikslov nazaj - dist je preštet v celicah
+        return self.water_dist[cy][cx] * self.cell_size
 
 
 class SpatialGrid:
@@ -89,9 +169,16 @@ class Agent:
     REPRO_COST_THIRST = 30
     REPRO_COOLDOWN = -30
 
+    cls_name = "Agent"
+    is_plant = False
+
+    id_counter = 0
+
     # ──────────────────────────────────────────────────────────
 
     def __init__(self, x: float, y: float, speed: float, size: float, sense: float):
+        Agent.id_counter += 1
+        self.id = Agent.id_counter
         self.x = x
         self.y = y
         self.speed = speed
@@ -116,16 +203,15 @@ class Agent:
     def radius(self):
         return AGENT_R_BASE + int(self.size - 1.0)
 
-    def update_needs(self):
+    def update_needs(self, terrain):
         if not self.alive: return
         self.age += 1
 
-        # LOGIKA IN PORABA AGENTOV:
-        # poraba_vode = base_thirst + (speed * faktor)
-        self.thirst += self.BASE_THIRST_RATE + (self.speed * self.SPEED_THIRST_FACTOR)
+        props = terrain.get_props_at(self.x, self.y)
 
-        # vpliv velikosti na lakoto: poraba_hrane = base_hunger * size
-        self.hunger += self.BASE_HUNGER_RATE * (self.size * self.SIZE_HUNGER_FACTOR)
+        # LOGIKA IN PORABA AGENTOV ob upoštevanju terena (thirst_mod, hunger_mod)
+        self.thirst += (self.BASE_THIRST_RATE + (self.speed * self.SPEED_THIRST_FACTOR)) * props["thirst_mod"]
+        self.hunger += (self.BASE_HUNGER_RATE * (self.size * self.SIZE_HUNGER_FACTOR)) * props["hunger_mod"]
 
         if self.hunger >= 100:
             self.hunger = 100
@@ -172,60 +258,62 @@ class Agent:
             return "Hunger"
         return "Wander"
 
-    def _clamp_pos(self, terrain):
-        """Zadrži agenta na mapi in upravlja trke z vodo."""
+    def _clamp_bounds(self):
+        """Prepreči beg izven okvirjev simulacije."""
         hit_wall = False
         if self.x < self.radius:
-            self.x = self.radius;
+            self.x = self.radius
             hit_wall = True
         elif self.x > SIM_WIDTH - self.radius:
-            self.x = SIM_WIDTH - self.radius;
+            self.x = SIM_WIDTH - self.radius
             hit_wall = True
 
         if self.y < self.radius:
-            self.y = self.radius;
+            self.y = self.radius
             hit_wall = True
         elif self.y > SIM_HEIGHT - self.radius:
-            self.y = SIM_HEIGHT - self.radius;
+            self.y = SIM_HEIGHT - self.radius
             hit_wall = True
 
-        if hit_wall:
-            self.wander_angle += math.pi
+        return hit_wall
 
-        # Trk z vodo (Agent ne more plavati, detelja ne more rasti na vodi)
-        # Type check izboljšan
-        for wx, wy, wr in terrain.water_bodies:
-            dx = self.x - wx
-            dy = self.y - wy
-            dist_sq = dx * dx + dy * dy
-            min_dist = wr + self.radius
+    def move_step(self, dx, dy, terrain):
+        """Varno premikanje, ki se ustavi pred neprehodnim terenom."""
+        props = terrain.get_props_at(self.x, self.y)
+        speed_modifier = props["speed_mod"]
 
-            if dist_sq < min_dist * min_dist:
-                dist = math.sqrt(dist_sq)
-                if dist == 0: dist = 0.1
-                overlap = min_dist - dist
-                self.x += (dx / dist) * overlap
-                self.y += (dy / dist) * overlap
-                # Detelja ne tava, jo samo odrine na obalo. Prepreči pojavljanje v vodi.
-                if not isinstance(self, Clover):
-                    self.wander_angle += math.pi
+        new_x = self.x + dx * speed_modifier
+        new_y = self.y + dy * speed_modifier
+
+        # Preveri, če je nova pozicija v neprehodnem območju
+        new_props = terrain.get_props_at(new_x, new_y)
+        if not new_props["walkable"]:
+            if not self.is_plant:
+                self.wander_angle += math.pi  # Obrni se
+            return False
+
+        self.x = new_x
+        self.y = new_y
+        if self._clamp_bounds():
+            if not self.is_plant:
+                self.wander_angle += math.pi
+        return True
 
     def move_towards(self, tx, ty, speed_limit, terrain):
         dist_sq = (tx - self.x) ** 2 + (ty - self.y) ** 2
         if dist_sq > 0:
             dist = math.sqrt(dist_sq)
             step = min(dist, speed_limit)
-            self.x += ((tx - self.x) / dist) * step
-            self.y += ((ty - self.y) / dist) * step
+            dx = ((tx - self.x) / dist) * step
+            dy = ((ty - self.y) / dist) * step
+            self.move_step(dx, dy, terrain)
             self.wander_angle = math.atan2(ty - self.y, tx - self.x)
-            self._clamp_pos(terrain)
 
     def wander(self, terrain):
         self.wander_angle += random.uniform(-0.3, 0.3)
-        # Hitrejše premikanje pri tavanju
-        self.x += math.cos(self.wander_angle) * self.speed
-        self.y += math.sin(self.wander_angle) * self.speed
-        self._clamp_pos(terrain)
+        dx = math.cos(self.wander_angle) * self.speed
+        dy = math.sin(self.wander_angle) * self.speed
+        self.move_step(dx, dy, terrain)
 
 
 class Prey(Agent):
@@ -239,45 +327,57 @@ class Prey(Agent):
     REPRO_COST_THIRST = 25      # <-- Sredina med 35 in 20
     REPRO_COOLDOWN = -60        # <-- Sredina med -80 in -40
 
+    cls_name = "Prey"
+
     # ──────────────────────────────────────────────────────────
 
     def __init__(self, x, y, speed, size, sense):
         super().__init__(x, y, speed, size, sense)
-        self.color = COLOR_AGENT_SAFE
-        self.max_age = random.randint(5000, 8000)  # Daljši lifespan rojstev
+        self.color = COLOR_AGENT_PREY
+        self.max_age = random.randint(3000, 5000)  # Daljši lifespan rojstev
 
     def act(self, terrain, spatial_grid, new_agents, mut_prob, mut_str):
         if not self.alive: return
 
         entities = spatial_grid.get_nearby(self.x, self.y, self.sense)
+        sense_sq = self.sense * self.sense
+
+        # Single pass preko vseh entitet za zbiranje
+        predators = []
+        potential_mates = []
+        food = []
+
+        for e in entities:
+            # Hitri filter
+            if abs(e.x - self.x) > self.sense or abs(e.y - self.y) > self.sense: continue
+            
+            if e.cls_name == "Predator" and e.alive:
+                predators.append(e)
+            elif e.cls_name == "Prey" and e.alive and e != self and e.sex != self.sex:
+                potential_mates.append(e)
+            elif e.is_plant and e.alive:
+                food.append(e)
 
         # 1. BEG PRED PLENILCI
         flee_dx, flee_dy = 0.0, 0.0
         fleeing = False
-        sense_sq = self.sense * self.sense
 
-        for e in entities:
-            if isinstance(e, Predator) and e.alive:
-                # Fast AABB check
-                if abs(e.x - self.x) > self.sense or abs(e.y - self.y) > self.sense:
-                    continue
-
-                dist_sq = (e.x - self.x) ** 2 + (e.y - self.y) ** 2
-                if dist_sq < sense_sq:
-                    fleeing = True
-                    weight = 1.0 / (dist_sq + 0.1)
-                    flee_dx += (self.x - e.x) * weight
-                    flee_dy += (self.y - e.y) * weight
+        for e in predators:
+            dist_sq = (e.x - self.x) ** 2 + (e.y - self.y) ** 2
+            if dist_sq < sense_sq:
+                fleeing = True
+                weight = 1.0 / (dist_sq + 0.1)
+                flee_dx += (self.x - e.x) * weight
+                flee_dy += (self.y - e.y) * weight
 
         if fleeing:
             self.current_action = "Flee"
             mag = math.hypot(flee_dx, flee_dy)
             if mag > 0:
-                # Beži z maksimalno hitrostjo
-                self.x += (flee_dx / mag) * (self.speed * 1.2)
-                self.y += (flee_dy / mag) * (self.speed * 1.2)
+                dx = (flee_dx / mag) * (self.speed * 1.2)
+                dy = (flee_dy / mag) * (self.speed * 1.2)
+                self.move_step(dx, dy, terrain)
                 self.wander_angle = math.atan2(flee_dy, flee_dx)
-                self._clamp_pos(terrain)
             return
 
         # 2. REŠEVANJE POTREB
@@ -288,17 +388,17 @@ class Prey(Agent):
             best_partner = None
             min_dist_sq = float('inf')
 
-            for e in entities:
-                if type(e) == type(self) and e.alive and e != self and e.sex != self.sex:
-                    if e.get_priority() == "Reproduction":
-                        d_sq = (e.x - self.x) ** 2 + (e.y - self.y) ** 2
-                        if d_sq < self.sense ** 2 and d_sq < min_dist_sq:
-                            min_dist_sq = d_sq
-                            best_partner = e
+            for e in potential_mates:
+                if e.get_priority() == "Reproduction":
+                    d_sq = (e.x - self.x) ** 2 + (e.y - self.y) ** 2
+                    if d_sq < sense_sq and d_sq < min_dist_sq:
+                        min_dist_sq = d_sq
+                        best_partner = e
 
             if best_partner:
-                dist = math.sqrt(min_dist_sq)
-                if dist < self.radius + best_partner.radius + 5:
+                dist_sq = min_dist_sq
+                req_dist = self.radius + best_partner.radius + 5
+                if dist_sq < req_dist * req_dist:
                     self.hunger += self.REPRO_COST_HUNGER
                     self.thirst += self.REPRO_COST_THIRST
                     self.reproductive_urge = self.REPRO_COOLDOWN
@@ -318,22 +418,22 @@ class Prey(Agent):
 
         elif pri == "Thirst":
             self.current_action = "Thirst"
-            best_w = None
-            min_dist_edge = float('inf')
+            # Uporabimo optimizirano O(1) pridobivanje vode namesto zamudnega O(N^2) skeniranja!
+            c_x, c_y = terrain.get_cell_coords(self.x, self.y)
+            n_target = terrain.nearest_water[c_y][c_x]
+            dist_to_water = terrain.get_water_dist_at(self.x, self.y)
 
-            for wx, wy, wr in terrain.water_bodies:
-                d = math.hypot(wx - self.x, wy - self.y) - wr
-                if d < min_dist_edge:
-                    min_dist_edge = d
-                    best_w = (wx, wy)
-
-            if best_w:
-                # Pije lahko, če je zelo blizu roba vode
-                if min_dist_edge < self.radius + 15:
+            # Preverimo, če je najbližja voda dovolj blizu in vidna agentu
+            if n_target and dist_to_water <= self.sense:
+                best_wx, best_wy = n_target
+                d_sq = (best_wx - self.x)**2 + (best_wy - self.y)**2
+                dist = math.sqrt(d_sq)
+                # Ob obali vode (ko razdalja pade pod celico), agenta reši žeja
+                if dist < terrain.cell_size + self.radius + 10:
                     self.thirst = max(0, self.thirst - 50)
                     self.current_action = "Drink"
                 else:
-                    self.move_towards(best_w[0], best_w[1], self.speed, terrain)
+                    self.move_towards(best_wx, best_wy, self.speed, terrain)
             else:
                 self.wander(terrain)
 
@@ -342,19 +442,15 @@ class Prey(Agent):
             best_food = None
             min_dist_sq = sense_sq
 
-            for e in entities:
-                if isinstance(e, Clover) and e.alive:
-                    dx, dy = e.x - self.x, e.y - self.y
-                    if abs(dx) > self.sense or abs(dy) > self.sense: continue
-
-                    d_sq = dx * dx + dy * dy
-                    if d_sq < min_dist_sq:
-                        min_dist_sq = d_sq
-                        best_food = e
+            for e in food:
+                d_sq = (e.x - self.x)**2 + (e.y - self.y)**2
+                if d_sq < min_dist_sq:
+                    min_dist_sq = d_sq
+                    best_food = e
 
             if best_food:
-                dist = math.sqrt(min_dist_sq)
-                if dist < self.radius + best_food.radius + 10:
+                req_dist = self.radius + best_food.radius + 10
+                if min_dist_sq < req_dist * req_dist:
                     best_food.alive = False
                     self.hunger = 0
                     self.current_action = "Eat"
@@ -365,7 +461,6 @@ class Prey(Agent):
         else:
             self.current_action = "Wander"
             self.wander(terrain)
-
 
 class Predator(Agent):
     # ── FAKTORJI PLENILCA: "Potrpežljivi lovec" ───────────────
@@ -378,12 +473,14 @@ class Predator(Agent):
     REPRO_COST_THIRST = 40
     REPRO_COOLDOWN = -150   # <-- Večji cooldown, da lisice ne prerastejo zajcev v drugi generaciji
 
+    cls_name = "Predator"
+
     # ──────────────────────────────────────────────────────────
 
     def __init__(self, x, y, speed, size, sense):
         super().__init__(x, y, speed, size, sense)
-        self.color = "#e03131"
-        self.max_age = random.randint(15000, 25000)  # Zelo dolg lifespan plenilca
+        self.color = COLOR_AGENT_PRED
+        self.max_age = random.randint(8000, 10000)  # Zelo dolg lifespan plenilca
 
     def get_priority(self):
         # Prilagojene prioritete plenilca
@@ -406,6 +503,7 @@ class Predator(Agent):
         pri = self.get_priority()
 
         entities = spatial_grid.get_nearby(self.x, self.y, self.sense)
+        sense_sq = self.sense * self.sense
 
         if pri == "Reproduction":
             self.current_action = "Mate"
@@ -413,16 +511,17 @@ class Predator(Agent):
             min_dist_sq = float('inf')
 
             for e in entities:
-                if type(e) == type(self) and e.alive and e != self and e.sex != self.sex:
+                if e.cls_name == "Predator" and e.alive and e != self and e.sex != self.sex:
+                    if abs(e.x - self.x) > self.sense or abs(e.y - self.y) > self.sense: continue
                     if e.get_priority() == "Reproduction":
                         d_sq = (e.x - self.x) ** 2 + (e.y - self.y) ** 2
-                        if d_sq < self.sense ** 2 and d_sq < min_dist_sq:
+                        if d_sq < sense_sq and d_sq < min_dist_sq:
                             min_dist_sq = d_sq
                             best_partner = e
 
             if best_partner:
-                dist = math.sqrt(min_dist_sq)
-                if dist < self.radius + best_partner.radius + 5:
+                req_dist = self.radius + best_partner.radius + 5
+                if min_dist_sq < req_dist * req_dist:
                     self.hunger += self.REPRO_COST_HUNGER
                     self.thirst += self.REPRO_COST_THIRST
                     self.reproductive_urge = self.REPRO_COOLDOWN
@@ -431,7 +530,6 @@ class Predator(Agent):
                     best_partner.thirst += best_partner.REPRO_COST_THIRST
                     best_partner.reproductive_urge = best_partner.REPRO_COOLDOWN
 
-                    # Plenilci imajo samo enega močnega mladiča hkrati
                     new_agents.append(self.mix_genes(best_partner, mut_prob, mut_str))
                 else:
                     self.move_towards(best_partner.x, best_partner.y, self.speed, terrain)
@@ -440,20 +538,21 @@ class Predator(Agent):
 
         elif pri == "Thirst":
             self.current_action = "Thirst"
-            best_w = None
-            min_dist_edge = float('inf')
-            for wx, wy, wr in terrain.water_bodies:
-                d = math.hypot(wx - self.x, wy - self.y) - wr
-                if d < min_dist_edge:
-                    min_dist_edge = d
-                    best_w = (wx, wy)
+            # O(1) pridobivanje vode v delčku milisekunde namesto O(N^2)
+            c_x, c_y = terrain.get_cell_coords(self.x, self.y)
+            n_target = terrain.nearest_water[c_y][c_x]
+            dist_to_water = terrain.get_water_dist_at(self.x, self.y)
 
-            if best_w:
-                if min_dist_edge < self.radius + 15:
+            if n_target and dist_to_water <= self.sense:
+                best_wx, best_wy = n_target
+                # Realna razdalja do znane lokacije kroga celice
+                d_sq = (best_wx - self.x)**2 + (best_wy - self.y)**2
+                dist = math.sqrt(d_sq)
+                if dist < terrain.cell_size + self.radius + 10:
                     self.thirst = max(0, self.thirst - 50)
                     self.current_action = "Drink"
                 else:
-                    self.move_towards(best_w[0], best_w[1], self.speed, terrain)
+                    self.move_towards(best_wx, best_wy, self.speed, terrain)
             else:
                 self.wander(terrain)
 
@@ -462,10 +561,9 @@ class Predator(Agent):
             best_prey = None
             best_score = -float('inf')
             min_dist_sq = float('inf')
-            sense_sq = self.sense * self.sense
 
             for e in entities:
-                if isinstance(e, Prey) and e.alive:
+                if e.cls_name == "Prey" and e.alive:
                     dx, dy = e.x - self.x, e.y - self.y
                     if abs(dx) > self.sense or abs(dy) > self.sense: continue
 
@@ -479,13 +577,12 @@ class Predator(Agent):
                             min_dist_sq = d_sq
 
             if best_prey:
-                dist = math.sqrt(min_dist_sq)
-                if dist < self.radius + best_prey.radius + 10:
+                req_dist = self.radius + best_prey.radius + 10
+                if min_dist_sq < req_dist * req_dist:
                     best_prey.alive = False
-                    self.hunger = 0  # En ulov povsem napolni želodec
+                    self.hunger = 0
                     self.current_action = "Consume"
                 else:
-                    # Predator dobi pospešek, ko vidi tarčo
                     self.move_towards(best_prey.x, best_prey.y, self.speed * 1.3, terrain)
             else:
                 self.current_action = "Hunger"
@@ -494,7 +591,6 @@ class Predator(Agent):
             self.current_action = "Wander"
             self.wander(terrain)
 
-
 class Clover(Agent):
     # ── FAKTORJI DETELJE: "Temelj ekosistema" ─────────────────
     BASE_THIRST_RATE = 0.8
@@ -502,27 +598,27 @@ class Clover(Agent):
     SIZE_HUNGER_FACTOR = 0.0
     BASE_REPRO_RATE = 0.4
 
+    cls_name = "Clover"
+    is_plant = True
+
     # ──────────────────────────────────────────────────────────
 
     def __init__(self, x: float, y: float, terrain):
         # Detelja ima večji smisel / korenine (npr. 150), da doseže vodo daleč stran
         super().__init__(x, y, speed=0.0, size=0.1, sense=150.0)
-        self.color = COLOR_FOOD
+        self.color = COLOR_AGENT_FOOD
         self.max_age = random.randint(800, 1500)  # Krajši lifespan za deteljo
         self.current_action = "Grow"
 
         # Randomizicija začetnega urge-a, da se ne razmnožijo na isti tick
         self.reproductive_urge = random.uniform(0, 50)
 
-        # Base vodni potencial izračunan enkrat (koliko vlage načeloma doseže rastlino)
-        self.base_water_potential = 0.0
-        for wx, wy, wr in terrain.water_bodies:
-            d = math.hypot(wx - self.x, wy - self.y) - wr
-            if d < self.sense:
-                # Koliko vlage dobi - bližje kot je robu = več vlage
-                supply = (self.sense - max(0, d)) / self.sense * 1.5
-                if supply > self.base_water_potential:
-                    self.base_water_potential = supply
+        # Base vodni potencial izračunan takoj, s preprostim pridobivanjem O(1)
+        dist_to_water = terrain.get_water_dist_at(self.x, self.y)
+        if dist_to_water < self.sense:
+            self.base_water_potential = (self.sense - max(0, dist_to_water)) / self.sense * 1.5
+        else:
+            self.base_water_potential = 0.0
 
         # Dinamični potencial, ki se posodablja
         self.moisture_supply = self.base_water_potential
@@ -566,7 +662,7 @@ class Clover(Agent):
 
         sosedi_count = 0
         for e in nearby_entities:
-            if isinstance(e, Clover) and e.alive and e != self:
+            if e.is_plant and e.alive and e != self:
                 # Točen izračun razdalje znotraj zamejene celice
                 if (e.x - self.x) ** 2 + (e.y - self.y) ** 2 < 900:  # 30^2 = 900
                     sosedi_count += 1
@@ -590,15 +686,17 @@ class Clover(Agent):
                 self.reproductive_urge = 0  # reset
                 self.thirst += 40  # Ceni jo vode
 
-                # Aseksualno širjenje beži stran od gneče
-                angle = random.uniform(0, 2 * math.pi)
-                dist = random.uniform(20, 50)
-                nx = max(0, min(SIM_WIDTH, self.x + math.cos(angle) * dist))
-                ny = max(0, min(SIM_HEIGHT, self.y + math.sin(angle) * dist))
-
-                new_clover = Clover(nx, ny, terrain)
-                new_clover._clamp_pos(terrain)
-                new_agents.append(new_clover)
+                for _ in range(5):  # Več poskusov za iskanje varne suhe lokacije
+                    angle = random.uniform(0, 2 * math.pi)
+                    dist = random.uniform(20, 50)
+                    nx = self.x + math.cos(angle) * dist
+                    ny = self.y + math.sin(angle) * dist
+                    
+                    if 0 < nx < SIM_WIDTH and 0 < ny < SIM_HEIGHT:
+                        if terrain.get_props_at(nx, ny)["walkable"]:
+                            new_clover = Clover(nx, ny, terrain)
+                            new_agents.append(new_clover)
+                            break
             else:
                 self.reproductive_urge = 100  # Čaka na priložnost
 
@@ -609,7 +707,7 @@ class Clover(Agent):
 
 class SimThread(threading.Thread):
     def __init__(self, data_queue: queue.Queue, n_prey: int, n_pred: int, n_food: int, init_params: dict,
-                 speed_entry: tk.Entry):
+                 speed_entry: tk.Entry, terrain_file: str = None):
         super().__init__(daemon=True)
         self.q = data_queue
         self.n_prey = n_prey
@@ -622,10 +720,11 @@ class SimThread(threading.Thread):
         self._paused = threading.Event()
         self._paused.set()
 
-        self.terrain = Terrain(SIM_WIDTH, SIM_HEIGHT)
+        self.terrain = Terrain(SIM_WIDTH, SIM_HEIGHT, CELL_SIZE, terrain_file)
         self.spatial_grid = SpatialGrid(100)
         self.agents: list[Agent] = []
         self.ticks = 0
+        self.dropped_frames = 0
 
     def stop(self):
         self._running = False
@@ -658,21 +757,19 @@ class SimThread(threading.Thread):
             pass
         return float(DEFAULT_SIM_SPEED)
 
-    def _spawn_clover(self):
-        """Spawna deteljo. 80% možnosti da bo blizu vode."""
-        if random.random() < 0.8 and self.terrain.water_bodies:
-            wx, wy, wr = random.choice(self.terrain.water_bodies)
-            angle = random.uniform(0, 2 * math.pi)
-            dist = wr + random.uniform(5, 60)  # Blizu roba
-            x = wx + math.cos(angle) * dist
-            y = wy + math.sin(angle) * dist
-        else:
-            x = random.uniform(10, SIM_WIDTH - 10)
-            y = random.uniform(10, SIM_HEIGHT - 10)
+    def _spawn_agent_safe(self, AgentClass, *args, **kwargs):
+        """Varno spawna agenta na lokaciji, ki je WALKABLE (omejeno število poizkusov)"""
+        for _ in range(20):
+            x = random.uniform(20, SIM_WIDTH - 20)
+            y = random.uniform(20, SIM_HEIGHT - 20)
+            if self.terrain.get_props_at(x, y)["walkable"]:
+                return AgentClass(x, y, *args, **kwargs)
+        # Fallback (zelo redko bi odpovedalo celih 20 seedov v Perlinu)
+        return AgentClass(SIM_WIDTH/2, SIM_HEIGHT/2, *args, **kwargs)
 
-        new_clover = Clover(max(0, min(SIM_WIDTH, x)), max(0, min(SIM_HEIGHT, y)), self.terrain)
-        new_clover._clamp_pos(self.terrain)  # Prepreči spawn v vodo ali izven mape
-        return new_clover
+    def _spawn_clover(self):
+        """Spawna deteljo na naključni sprejemljivi podlagi."""
+        return self._spawn_agent_safe(Clover, self.terrain)
 
     def _spawn(self):
         self.agents = []
@@ -683,18 +780,13 @@ class SimThread(threading.Thread):
             s_speed = self.init_params['speed'] * random.uniform(0.9, 1.1)
             s_size = self.init_params['size'] * random.uniform(0.9, 1.1)
             s_sense = self.init_params['sense'] * random.uniform(0.9, 1.1)
-            self.agents.append(
-                Prey(random.uniform(10, SIM_WIDTH - 10), random.uniform(10, SIM_HEIGHT - 10), s_speed, s_size, s_sense))
+            self.agents.append(self._spawn_agent_safe(Prey, s_speed, s_size, s_sense))
 
         for _ in range(self.n_pred):
-            # Plenilec potrebuje biti hitrejši, da bolje lovi in regulira zajce 
             s_speed = (self.init_params['speed'] * 1.5) * random.uniform(0.9, 1.1)
             s_size = (self.init_params['size'] * 1.2) * random.uniform(0.9, 1.1)
-            # Predator ima izrazito večji vid (baseline 1.7x), da lahko zalezuje plen
             s_sense = (self.init_params['sense'] * 1.7) * random.uniform(0.9, 1.1)
-            self.agents.append(
-                Predator(random.uniform(10, SIM_WIDTH - 10), random.uniform(10, SIM_HEIGHT - 10), s_speed, s_size,
-                         s_sense))
+            self.agents.append(self._spawn_agent_safe(Predator, s_speed, s_size, s_sense))
 
     def _step(self):
         self.ticks += 1
@@ -709,35 +801,35 @@ class SimThread(threading.Thread):
                 if isinstance(ag, Clover):
                     ag.act(self.terrain, self.spatial_grid, new_agents, self.n_food)
                 else:
-                    ag.update_needs()
+                    ag.update_needs(self.terrain)
                     ag.act(self.terrain, self.spatial_grid, new_agents, self.init_params.get('mut_prob', 0.1),
                            self.init_params.get('mut_str', 0.2))
 
         self.agents.extend(new_agents)
         self.agents = [a for a in self.agents if a.alive]
 
-        # Naključni "Spore" Spawn: Zelo majhna verjetnost za kolonizacijo naključne suhe lokacije
-        if random.random() < 0.005:  # pribl. 1 na 200 tickov
-            spore = Clover(random.uniform(10, SIM_WIDTH - 10), random.uniform(10, SIM_HEIGHT - 10), self.terrain)
-            spore._clamp_pos(self.terrain)  # Prepreči spawn v vodo ali izven mape
-            self.agents.append(spore)
+        # Naključni "Spore" Spawn: kolonizacija na safe zemlji
+        if random.random() < 0.005:  
+            self.agents.append(self._spawn_clover())
 
     def _send_payload(self):
         payload = {
             'ticks': self.ticks,
-            'terrain_water': self.terrain.water_bodies,
+            'dropped_frames': self.dropped_frames,
             'agents': [(
-                ag.x, ag.y, ag.radius, ag.color, ag.alive, ag.sense, ag.sex, ag.current_action,
-                ag.hunger, ag.thirst, getattr(ag, 'max_age', 100), getattr(ag, 'age', 0),
-                type(ag).__name__
+                ag.id, ag.x, ag.y, ag.radius, ag.color, ag.alive, ag.sense, ag.current_action,
+                ag.hunger, ag.thirst, ag.cls_name
             ) for ag in self.agents],
             'active_cnt': len(self.agents),
-            'prey_cnt': sum(1 for a in self.agents if isinstance(a, Prey)),
-            'pred_cnt': sum(1 for a in self.agents if isinstance(a, Predator)),
-            'clover_cnt': sum(1 for a in self.agents if isinstance(a, Clover))
+            'prey_cnt': sum(1 for a in self.agents if a.cls_name == "Prey"),
+            'pred_cnt': sum(1 for a in self.agents if a.cls_name == "Predator"),
+            'clover_cnt': sum(1 for a in self.agents if a.is_plant)
         }
-        if self.q.qsize() < QUEUE_MAX:
-            self.q.put(payload)
+        
+        try:
+            self.q.put_nowait(payload)
+        except queue.Full:
+            self.dropped_frames += 1
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -767,7 +859,7 @@ class App(tk.Tk):
         self.title("EcoSim MVP - Optimizirano")
 
         self.sim = None
-        self.q = queue.Queue()
+        self.q = queue.Queue(maxsize=2)  # Limited queue ensures sim thread is completely decoupled
         self._restarted = False
         self._last_payload = None
 
@@ -775,6 +867,8 @@ class App(tk.Tk):
         self.pan_y = 0
         self._drag_start_x = 0
         self._drag_start_y = 0
+
+        self._agent_graphics = {}  # Shranjevanje canvas ID-jev za vsakega agenta
 
         self._build_ui()
 
@@ -798,7 +892,7 @@ class App(tk.Tk):
         self._build_buttons()
         self._build_settings()
 
-        self.lbl_info = tk.Label(root, text="Ticks: 0 | Skupaj: 0 | Plen: 0 | Plenilci: 0 | Detelja: 0",
+        self.lbl_info = tk.Label(root, text="Ticks: 0 | Skupaj: 0 | Plen: 0 | Plenilci: 0 | Detelja: 0 | Dropped: 0",
                                  font=("Arial", 9, "bold"))
         self.lbl_info.pack(side=tk.BOTTOM, anchor="e")
 
@@ -820,6 +914,11 @@ class App(tk.Tk):
         self.ent_speed = tk.Entry(bar, width=6)
         self.ent_speed.insert(0, DEFAULT_SIM_SPEED)
         self.ent_speed.pack(side=tk.LEFT)
+
+        tk.Label(bar, text="UI Osveževanje (ms):").pack(side=tk.LEFT, padx=(20, 2))
+        self.ent_refresh = tk.Entry(bar, width=6)
+        self.ent_refresh.insert(0, DEFAULT_UI_REFRESH_MS)
+        self.ent_refresh.pack(side=tk.LEFT)
 
         self.var_debug = tk.BooleanVar(value=True)
         tk.Checkbutton(
@@ -845,6 +944,18 @@ class App(tk.Tk):
 
         self.p_mut_prob = ParamEntry(row1, "Verjetnost mut.\n(npr. 0.1)", DEFAULT_MUT_PROB, width=6)
         self.p_mut_str = ParamEntry(row1, "Moč mutacije\n(npr. 0.2)", DEFAULT_MUT_STR, width=6)
+
+        row2 = tk.Frame(outer)
+        row2.pack(fill=tk.X, pady=5)
+        
+        tk.Label(row2, text="Izbira podlage (Teren):").pack(side=tk.LEFT, padx=(5, 10))
+        
+        terrain_files = glob.glob(os.path.join("terrains", "*.json"))
+        terrain_opts = ["Random Generate"] + terrain_files
+        
+        self.var_terrain = tk.StringVar(value="Random Generate")
+        self.opt_terrain = tk.OptionMenu(row2, self.var_terrain, *terrain_opts)
+        self.opt_terrain.pack(side=tk.LEFT)
 
     def _on_drag_start(self, event):
         self._drag_start_x = event.x
@@ -891,13 +1002,17 @@ class App(tk.Tk):
             print("Neveljavni podatki!")
             return
 
+        terrain_file = getattr(self, 'var_terrain', None)
+        selected_terrain = terrain_file.get() if terrain_file else "Random Generate"
+
         self.sim = SimThread(
             data_queue=self.q,
             n_prey=n_prey,
             n_pred=n_pred,
             n_food=n_food,
             init_params=init_params,
-            speed_entry=self.ent_speed
+            speed_entry=self.ent_speed,
+            terrain_file=selected_terrain
         )
         self.sim.start()
         self._set_ui_running(True)
@@ -926,15 +1041,20 @@ class App(tk.Tk):
 
         self._last_payload = None
         self.sim_canvas.delete("all")
-        self.lbl_info.config(text="Ticks: 0 | Skupaj: 0 | Plen: 0 | Plenilci: 0 | Detelja: 0")
+        self._agent_graphics.clear()
+        self._terrain_drawn = False # Reset za ponoven izris terena
+        self.lbl_info.config(text="Ticks: 0 | Skupaj: 0 | Plen: 0 | Plenilci: 0 | Detelja: 0 | Dropped: 0")
         self._set_ui_running(False)
 
     def _poll_queue(self):
         if self._restarted: return
 
         latest = None
+        # Poberi VSE kar je trenutno v vrsti, prikaži samo ZADNJE stanje
+        # To zmanjša lag, ker preskoči stare izrise, če simulacija teče hitreje kot zaslon
         try:
-            while True: latest = self.q.get_nowait()
+            while True: 
+                latest = self.q.get_nowait()
         except queue.Empty:
             pass
 
@@ -943,49 +1063,128 @@ class App(tk.Tk):
             self._draw_sim(latest)
             self._update_info(latest)
 
-        self.after(SIM_REFRESH_MS, self._poll_queue)
+        try:
+            refresh_ms = int(self.ent_refresh.get())
+            if refresh_ms < 10: refresh_ms = 10
+        except ValueError:
+            refresh_ms = int(DEFAULT_UI_REFRESH_MS)
+
+        self.after(refresh_ms, self._poll_queue)
 
     def _draw_sim(self, payload: dict):
-        self.sim_canvas.delete("all")
         px, py = self.pan_x, self.pan_y
 
-        for wx, wy, wr in payload.get('terrain_water', []):
-            self.sim_canvas.create_oval(wx + px - wr, wy + py - wr, wx + px + wr, wy + py + wr,
-                                        fill="#2980b9", outline="#3498db", width=3, tags="terrain")
+        # Inicializacija ali premikanje terena ob "pan" premiku
+        if not getattr(self, '_terrain_drawn', False):
+            self.sim_canvas.delete("terrain")
+            # Nariši Terrain Grid na začetku iz simulacije - Z Run-Length Encodingom da drastično zmanjšamo število elementov
+            terrain = self.sim.terrain if self.sim else None
+            if terrain:
+                for y in range(terrain.rows):
+                    start_x = 0
+                    current_ctype = terrain.grid[y][0]
+                    for x in range(1, terrain.cols):
+                        if terrain.grid[y][x] != current_ctype:
+                            # Nariši vrsto združenih pravokotnikov naenkrat
+                            col = terrain.TERRAIN_PROPS[current_ctype]["color"]
+                            wx1 = start_x * terrain.cell_size
+                            wy1 = y * terrain.cell_size
+                            wx2 = x * terrain.cell_size
+                            wy2 = (y + 1) * terrain.cell_size
+                            self.sim_canvas.create_rectangle(wx1, wy1, wx2, wy2, fill=col, outline="", tags="terrain")
+                            
+                            start_x = x
+                            current_ctype = terrain.grid[y][x]
+                            
+                    # Nariši preostanek še ob koncu zanke
+                    col = terrain.TERRAIN_PROPS[current_ctype]["color"]
+                    wx1 = start_x * terrain.cell_size
+                    wy1 = y * terrain.cell_size
+                    wx2 = terrain.cols * terrain.cell_size
+                    wy2 = (y + 1) * terrain.cell_size
+                    self.sim_canvas.create_rectangle(wx1, wy1, wx2, wy2, fill=col, outline="", tags="terrain")
+                                                         
+            self._terrain_drawn = True
+        
+        # Panning the entire canvas
+        self.sim_canvas.scan_mark(0, 0)
+        self.sim_canvas.scan_dragto(px, py, gain=1)
 
         debug = self.var_debug.get()
+        current_ids = set()
 
-        for (ax, ay, ar, col, alive, sense, sex, action,
-             hunger, thirst, max_age, age, cls_name) in payload['agents']:
-            cx, cy = ax + px, ay + py
+        for (ag_id, ax, ay, ar, col, alive, sense, action,
+             hunger, thirst, cls_name) in payload['agents']:
+            if not alive: continue
+            
+            current_ids.add(ag_id)
+            cx, cy = ax, ay
 
-            if alive:
-                if debug and cls_name != "Clover":
-                    # Krog vida
-                    self.sim_canvas.create_oval(cx - sense, cy - sense, cx + sense, cy + sense,
-                                                outline="#444444", width=1, dash=(2, 4), tags="debug")
+            # Če agenta še ni na zaslonu, ga ustvarimo
+            if ag_id not in self._agent_graphics:
+                g = {}
+                g['sight'] = self.sim_canvas.create_oval(0, 0, 0, 0, outline="#444444", width=1, dash=(2, 4), state=tk.HIDDEN)
+                g['hp_bg'] = self.sim_canvas.create_rectangle(0, 0, 0, 0, fill="#333", outline="", state=tk.HIDDEN)
+                g['hp_fg'] = self.sim_canvas.create_rectangle(0, 0, 0, 0, fill="#e74c3c", outline="", state=tk.HIDDEN)
+                g['tp_bg'] = self.sim_canvas.create_rectangle(0, 0, 0, 0, fill="#333", outline="", state=tk.HIDDEN)
+                g['tp_fg'] = self.sim_canvas.create_rectangle(0, 0, 0, 0, fill="#3498db", outline="", state=tk.HIDDEN)
+                g['text'] = self.sim_canvas.create_text(0, 0, text="", fill="#f1c40f", font=("Arial", 8, "bold"), state=tk.HIDDEN)
+                # Telo naj bo vedno na vrhu (narisano nazadnje v zanki kreacije)
+                g['body'] = self.sim_canvas.create_oval(0, 0, 0, 0, fill=col, outline="black", width=1)
+                g['debug_visible'] = False
+                self._agent_graphics[ag_id] = g
 
-                    # Vrstica lakote (Rdeča)
-                    bar_w = 16
-                    hp = min(1.0, hunger / 100.0)
-                    self.sim_canvas.create_rectangle(cx - bar_w / 2, cy - ar - 14, cx + bar_w / 2, cy - ar - 11,
-                                                     fill="#333", outline="", tags="debug")
-                    self.sim_canvas.create_rectangle(cx - bar_w / 2, cy - ar - 14, cx - bar_w / 2 + bar_w * hp,
-                                                     cy - ar - 11, fill="#e74c3c", outline="", tags="debug")
+            g = self._agent_graphics[ag_id]
 
-                    # Vrstica žeje (Modra)
-                    tp = min(1.0, thirst / 100.0)
-                    self.sim_canvas.create_rectangle(cx - bar_w / 2, cy - ar - 10, cx + bar_w / 2, cy - ar - 7,
-                                                     fill="#333", outline="", tags="debug")
-                    self.sim_canvas.create_rectangle(cx - bar_w / 2, cy - ar - 10, cx - bar_w / 2 + bar_w * tp,
-                                                     cy - ar - 7, fill="#3498db", outline="", tags="debug")
+            # Posodobi pozicijo telesa
+            self.sim_canvas.coords(g['body'], cx - ar, cy - ar, cx + ar, cy + ar)
 
-                    # Akcija in status
-                    self.sim_canvas.create_text(cx, cy - ar - 22, text=f"{action}",
-                                                fill="#f1c40f", font=("Arial", 8, "bold"), tags="debug")
+            # Upravljanje vidnosti in animacije Debug elementov
+            if debug and cls_name != "Clover":
+                if not g['debug_visible']:
+                    self.sim_canvas.itemconfig(g['sight'], state=tk.NORMAL)
+                    self.sim_canvas.itemconfig(g['hp_bg'], state=tk.NORMAL)
+                    self.sim_canvas.itemconfig(g['hp_fg'], state=tk.NORMAL)
+                    self.sim_canvas.itemconfig(g['tp_bg'], state=tk.NORMAL)
+                    self.sim_canvas.itemconfig(g['tp_fg'], state=tk.NORMAL)
+                    self.sim_canvas.itemconfig(g['text'], state=tk.NORMAL)
+                    g['debug_visible'] = True
+                    
+                self.sim_canvas.coords(g['sight'], cx - sense, cy - sense, cx + sense, cy + sense)
+                
+                bar_w = 16
+                hp = min(1.0, hunger / 100.0)
+                self.sim_canvas.coords(g['hp_bg'], cx - bar_w / 2, cy - ar - 14, cx + bar_w / 2, cy - ar - 11)
+                self.sim_canvas.coords(g['hp_fg'], cx - bar_w / 2, cy - ar - 14, cx - bar_w / 2 + bar_w * hp, cy - ar - 11)
 
-                self.sim_canvas.create_oval(cx - ar, cy - ar, cx + ar, cy + ar,
-                                            fill=col, outline="black", width=1, tags="agents")
+                tp = min(1.0, thirst / 100.0)
+                self.sim_canvas.coords(g['tp_bg'], cx - bar_w / 2, cy - ar - 10, cx + bar_w / 2, cy - ar - 7)
+                self.sim_canvas.coords(g['tp_fg'], cx - bar_w / 2, cy - ar - 10, cx - bar_w / 2 + bar_w * tp, cy - ar - 7)
+
+                self.sim_canvas.itemconfig(g['text'], text=action)
+                self.sim_canvas.coords(g['text'], cx, cy - ar - 22)
+            else:
+                if g['debug_visible']:
+                    self.sim_canvas.itemconfig(g['sight'], state=tk.HIDDEN)
+                    self.sim_canvas.itemconfig(g['hp_bg'], state=tk.HIDDEN)
+                    self.sim_canvas.itemconfig(g['hp_fg'], state=tk.HIDDEN)
+                    self.sim_canvas.itemconfig(g['tp_bg'], state=tk.HIDDEN)
+                    self.sim_canvas.itemconfig(g['tp_fg'], state=tk.HIDDEN)
+                    self.sim_canvas.itemconfig(g['text'], state=tk.HIDDEN)
+                    g['debug_visible'] = False
+
+        # Odstrani in počisti narisane komponente za mrtve agente
+        dead_ids = []
+        for ag_id, g in self._agent_graphics.items():
+            if ag_id not in current_ids:
+                for key, item in g.items():
+                    if key != 'debug_visible':
+                        self.sim_canvas.delete(item)
+                dead_ids.append(ag_id)
+        
+        for dead in dead_ids:
+            del self._agent_graphics[dead]
+
 
     def _update_info(self, payload: dict):
         active_cnt = payload.get('active_cnt', 0)
@@ -993,8 +1192,9 @@ class App(tk.Tk):
         pred_cnt = payload.get('pred_cnt', 0)
         clover_cnt = payload.get('clover_cnt', 0)
         ticks = payload.get('ticks', 0)
+        dropped = payload.get('dropped_frames', 0)
         self.lbl_info.config(
-            text=f"Tiki: {ticks} | Skupaj: {active_cnt} | Zajci: {prey_cnt} | Lisice: {pred_cnt} | Detelja: {clover_cnt}")
+            text=f"Tiki: {ticks} | Skupaj: {active_cnt} | Zajci: {prey_cnt} | Lisice: {pred_cnt} | Detelja: {clover_cnt} | Dropped: {dropped}")
 
 
 if __name__ == "__main__":
