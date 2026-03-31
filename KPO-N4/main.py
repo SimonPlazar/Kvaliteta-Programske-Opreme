@@ -487,7 +487,8 @@ class Clover(Agent):
     # ──────────────────────────────────────────────────────────
 
     def __init__(self, x: float, y: float, terrain):
-        super().__init__(x, y, speed=0.0, size=0.1, sense=60.0)
+        # Detelja ima večji smisel / korenine (npr. 150), da doseže vodo daleč stran
+        super().__init__(x, y, speed=0.0, size=0.1, sense=150.0)
         self.color = COLOR_FOOD
         self.max_age = random.randint(1500, 3000)
         self.current_action = "Grow"
@@ -495,53 +496,93 @@ class Clover(Agent):
         # Randomizicija začetnega urge-a, da se ne razmnožijo na isti tick
         self.reproductive_urge = random.uniform(0, 50)
 
-        # Voda za deteljo se izračuna samo enkrat ob rojstvu (glede na razdaljo do vode)
-        self.moisture_supply = 0.0
+        # Base vodni potencial izračunan enkrat (koliko vlage načeloma doseže rastlino)
+        self.base_water_potential = 0.0
         for wx, wy, wr in terrain.water_bodies:
             d = math.hypot(wx - self.x, wy - self.y) - wr
             if d < self.sense:
                 # Koliko vlage dobi - bližje kot je robu = več vlage
                 supply = (self.sense - max(0, d)) / self.sense * 1.5
-                if supply > self.moisture_supply:
-                    self.moisture_supply = supply
+                if supply > self.base_water_potential:
+                    self.base_water_potential = supply
+
+        # Dinamični potencial, ki se posodablja
+        self.moisture_supply = self.base_water_potential
 
     @property
     def radius(self):
         return FOOD_R
 
-    def update_needs(self):
+    def update_needs(self): # Zdaj zahteva argument, ampak ga bomo predelali v act() za optimizacijo
+        pass 
+        
+    def _update_plant_needs(self, local_crowding_factor):
         if not self.alive: return
         self.age += 1
         
-        # Detelja potrebuje vodo za preživetje in jo črpa glede na moisture_supply nastavljen ob rojstvu.
-        # Če je supply manjši od THIRST_RATE, bo detelja počasi dehidrirala in umrla (Oddaljena od vode).
-        self.thirst += self.BASE_THIRST_RATE - self.moisture_supply
+        # Izračun končne vlage: Base zmanjšan za lokalno tekmovanje (crowding)
+        self.moisture_supply = self.base_water_potential / max(1.0, local_crowding_factor)
         
-        # Adaptiven urge glede na vodo (manj thirsta=hitreje)
-        health_factor = max(0, 1.0 - (self.thirst / 100.0))
-        self.reproductive_urge += self.BASE_REPRO_RATE * (0.2 + 1.5 * health_factor)
-
+        # Detelja dehidrira, če nima dovolj vode, in se polni, če jo ima viška.
+        net_thirst = self.BASE_THIRST_RATE - self.moisture_supply
+        self.thirst = max(0.0, min(150.0, self.thirst + net_thirst))
+        
         if self.thirst >= 100 or self.age > self.max_age:
             self.alive = False
+            return
 
-    def act(self, terrain, spatial_grid, new_agents):
+        # Adaptiven urge: Uspešno raste, če ima dovolj vlage.
+        # Razmnožuje se le, če je resnično odžejana (thirst < 5)
+        if self.thirst < 5.0 and self.moisture_supply > self.BASE_THIRST_RATE:
+            health_factor = max(0.0, 1.0 - (self.thirst / 100.0))
+            # Višek vlage pomaga pri rasti reprodukcije
+            surplus = self.moisture_supply - self.BASE_THIRST_RATE
+            self.reproductive_urge += self.BASE_REPRO_RATE * (0.5 + 2.0 * health_factor + surplus)
+
+    def act(self, terrain, spatial_grid, new_agents, max_food_capacity):
         if not self.alive: return
+
+        # 1. Zaznavanje sosedov in "Dušenje" (Resource Competition)
+        # Manjši radij iskanja za tekmovanje sosedov (~30 pikslov)
+        nearby_entities = spatial_grid.get_nearby(self.x, self.y, 30)
+        
+        sosedi_count = 0
+        for e in nearby_entities:
+            if isinstance(e, Clover) and e.alive and e != self:
+                # Točen izračun razdalje znotraj zamejene celice
+                if (e.x - self.x)**2 + (e.y - self.y)**2 < 900: # 30^2 = 900
+                    sosedi_count += 1
+        
+        # Globalna rodovitnost zmanjša tekmovanje (višji max_food = lažje rastjo skupaj)
+        # Npr. capacity okoli 80 da normalni pritisk. 
+        fertility_modifier = 80.0 / max(1.0, float(max_food_capacity))
+        
+        # Lokalni pritisk: 1 sosed je skoraj neopazen, 5 je precej, 20 je huda suša
+        # Koeficient dušenja je dinamičen
+        crowding_penalty = (sosedi_count * 0.15) * fertility_modifier
+        
+        self._update_plant_needs(1.0 + crowding_penalty)
+
+        if not self.alive: return
+
+        # 2. Razmnoževanje
         if self.reproductive_urge >= 100:
-            # Ne razmnoži se, če bi jo to takoj ubilo (težava s sušo)
-            if self.thirst < 70:
-                self.reproductive_urge = 0 # reset po množenju
-                self.thirst += 30
-                # Aseksualno širjenje v bližini
+            # Strog pogoj: Je polna vode, in ima prostor (npr. manj kot 8 sosedov)
+            if self.thirst < 5.0 and sosedi_count < 8:
+                self.reproductive_urge = 0 # reset
+                self.thirst += 40 # Ceni jo vode
+                
+                # Aseksualno širjenje beži stran od gneče
                 angle = random.uniform(0, 2 * math.pi)
-                dist = random.uniform(20, 40)
+                dist = random.uniform(20, 50)
                 nx = max(0, min(SIM_WIDTH, self.x + math.cos(angle) * dist))
                 ny = max(0, min(SIM_HEIGHT, self.y + math.sin(angle) * dist))
                 
                 new_clover = Clover(nx, ny, terrain)
-                new_clover._clamp_pos(terrain) # Preprečitev, da bi bla v vodi ali out of bounds
+                new_clover._clamp_pos(terrain) 
                 new_agents.append(new_clover)
             else:
-                self.reproductive_urge = 100 # Čaka
+                self.reproductive_urge = 100 # Čaka na priložnost
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 3.  SIMULATION ENGINE
@@ -637,10 +678,10 @@ class SimThread(threading.Thread):
         new_agents = []
         for ag in self.agents:
             if ag.alive:
-                ag.update_needs()
                 if isinstance(ag, Clover):
-                    ag.act(self.terrain, None, new_agents)
+                    ag.act(self.terrain, self.spatial_grid, new_agents, self.n_food)
                 else:
+                    ag.update_needs()
                     ag.act(self.terrain, self.spatial_grid, new_agents)
 
         self.agents.extend(new_agents)
