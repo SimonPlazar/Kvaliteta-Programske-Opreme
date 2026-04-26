@@ -359,6 +359,99 @@ class Agent:
         self.move_towards(target_x, target_y, self.speed, terrain)
         return True, False
 
+    def get_closest_target(self, entities, sense_sq, filter_func, score_func=None):
+        best_target = None
+        min_distance_sq = float('inf')
+        best_score = -float('inf')
+
+        for entity in entities:
+            if not filter_func(entity):
+                continue
+            distance_sq = (entity.x - self.x) ** 2 + (entity.y - self.y) ** 2
+            if distance_sq >= sense_sq:
+                continue
+
+            if score_func:
+                score = score_func(entity, distance_sq)
+                if score > best_score:
+                    best_score = score
+                    best_target = entity
+                    min_distance_sq = distance_sq
+            else:
+                if distance_sq < min_distance_sq:
+                    min_distance_sq = distance_sq
+                    best_target = entity
+
+        return best_target, min_distance_sq
+
+    def _handle_thirst(self, terrain):
+        self.current_action = Action.THIRST
+        water_handled, did_drink = self.try_drink_from_nearest_water(terrain, self.sense)
+        if did_drink:
+            self.current_action = Action.DRINK
+            return
+        if not water_handled:
+            self.wander(terrain)
+
+    def _handle_reproduction(self, entities, sense_sq, new_agents, terrain, mutation_probability, mutation_strength):
+        self.current_action = Action.MATE
+        best_partner, min_dist_sq = self.get_closest_target(
+            entities, sense_sq,
+            lambda e: e.entity_type == self.entity_type and e.alive and e != self and getattr(e, 'sex', None) != self.sex and e.get_priority() is Priority.REPRODUCTION
+        )
+
+        if not best_partner:
+            self.wander(terrain)
+            return
+
+        can_reproduce_now = self.is_in_interaction_range(best_partner, min_dist_sq, REPRODUCTION_DISTANCE_PADDING)
+        if can_reproduce_now:
+            self.hunger += self.REPRO_COST_HUNGER
+            self.thirst += self.REPRO_COST_THIRST
+            self.reproductive_urge = self.REPRO_COOLDOWN
+
+            best_partner.hunger += best_partner.REPRO_COST_HUNGER
+            best_partner.thirst += best_partner.REPRO_COST_THIRST
+            best_partner.reproductive_urge = best_partner.REPRO_COOLDOWN
+
+            self._spawn_offspring(best_partner, new_agents, mutation_probability, mutation_strength)
+            return
+
+        self.move_towards(best_partner.x, best_partner.y, self.speed, terrain)
+
+    def _spawn_offspring(self, partner, new_agents, mutation_probability, mutation_strength):
+        new_agents.append(self.mix_genes(partner, mutation_probability, mutation_strength))
+
+    def act(self, terrain, spatial_grid, new_agents, mutation_probability, mutation_strength):
+        if not self.alive: return
+
+        entities = spatial_grid.get_nearby(self.x, self.y, self.sense)
+        sense_sq = self.sense * self.sense
+
+        if self._special_interrupt(entities, sense_sq, terrain):
+            return
+
+        priority = self.get_priority()
+        if priority is Priority.REPRODUCTION:
+            self._handle_reproduction(entities, sense_sq, new_agents, terrain, mutation_probability, mutation_strength)
+            return
+
+        if priority is Priority.THIRST:
+            self._handle_thirst(terrain)
+            return
+
+        if priority is Priority.HUNGER:
+            self._handle_hunger(entities, sense_sq, terrain)
+            return
+
+        self.current_action = Action.WANDER
+        self.wander(terrain)
+
+    def _special_interrupt(self, entities, sense_sq, terrain):
+        return False
+
+    def _handle_hunger(self, entities, sense_sq, terrain):
+        pass
 
 class Prey(Agent):
     # Prey tuning constants.
@@ -378,35 +471,23 @@ class Prey(Agent):
         self.color = COLOR_AGENT_PREY
         self.max_age = random.randint(3000, 5000)
 
-    def _categorize_visible_entities(self, entities):
-        predators = []
-        potential_mates = []
-        food = []
+    def _spawn_offspring(self, partner, new_agents, mutation_probability, mutation_strength):
+        litter_size = random.choice([1, 1, 2, 2, 2, 3])
+        for _ in range(litter_size):
+            new_agents.append(self.mix_genes(partner, mutation_probability, mutation_strength))
 
-        for entity in entities:
-            if abs(entity.x - self.x) > self.sense or abs(entity.y - self.y) > self.sense:
-                continue
-
-            if entity.entity_type is EntityType.PREDATOR and entity.alive:
-                predators.append(entity)
-            elif entity.entity_type is EntityType.PREY and entity.alive and entity != self and entity.sex != self.sex:
-                potential_mates.append(entity)
-            elif entity.is_plant and entity.alive:
-                food.append(entity)
-
-        return predators, potential_mates, food
-
-    def _flee_if_needed(self, predators, sense_sq, terrain):
+    def _special_interrupt(self, entities, sense_sq, terrain):
         flee_dx, flee_dy = 0.0, 0.0
         fleeing = False
 
-        for predator in predators:
-            distance_sq = (predator.x - self.x) ** 2 + (predator.y - self.y) ** 2
-            if distance_sq < sense_sq:
-                fleeing = True
-                escape_weight = 1.0 / (distance_sq + 0.1)
-                flee_dx += (self.x - predator.x) * escape_weight
-                flee_dy += (self.y - predator.y) * escape_weight
+        for entity in entities:
+            if entity.entity_type is EntityType.PREDATOR and entity.alive:
+                distance_sq = (entity.x - self.x) ** 2 + (entity.y - self.y) ** 2
+                if distance_sq < sense_sq:
+                    fleeing = True
+                    escape_weight = 1.0 / (distance_sq + 0.1)
+                    flee_dx += (self.x - entity.x) * escape_weight
+                    flee_dy += (self.y - entity.y) * escape_weight
 
         if not fleeing:
             return False
@@ -420,60 +501,12 @@ class Prey(Agent):
             self.wander_angle = math.atan2(flee_dy, flee_dx)
         return True
 
-    def _handle_reproduction(self, potential_mates, sense_sq, new_agents, mutation_probability, mutation_strength, terrain):
-        self.current_action = Action.MATE
-        best_partner = None
-        min_distance_sq = float('inf')
-
-        for mate in potential_mates:
-            if mate.get_priority() is not Priority.REPRODUCTION:
-                continue
-
-            distance_sq = (mate.x - self.x) ** 2 + (mate.y - self.y) ** 2
-            if distance_sq < sense_sq and distance_sq < min_distance_sq:
-                min_distance_sq = distance_sq
-                best_partner = mate
-
-        if not best_partner:
-            self.wander(terrain)
-            return
-
-        can_reproduce_now = self.is_in_interaction_range(best_partner, min_distance_sq, REPRODUCTION_DISTANCE_PADDING)
-        if can_reproduce_now:
-            self.hunger += self.REPRO_COST_HUNGER
-            self.thirst += self.REPRO_COST_THIRST
-            self.reproductive_urge = self.REPRO_COOLDOWN
-
-            best_partner.hunger += best_partner.REPRO_COST_HUNGER
-            best_partner.thirst += best_partner.REPRO_COST_THIRST
-            best_partner.reproductive_urge = best_partner.REPRO_COOLDOWN
-
-            litter_size = random.choice([1, 1, 2, 2, 2, 3])
-            for _ in range(litter_size):
-                new_agents.append(self.mix_genes(best_partner, mutation_probability, mutation_strength))
-            return
-
-        self.move_towards(best_partner.x, best_partner.y, self.speed, terrain)
-
-    def _handle_thirst(self, terrain):
-        self.current_action = Action.THIRST
-        water_handled, did_drink = self.try_drink_from_nearest_water(terrain, self.sense)
-        if did_drink:
-            self.current_action = Action.DRINK
-            return
-        if not water_handled:
-            self.wander(terrain)
-
-    def _handle_hunger(self, food, sense_sq, terrain):
+    def _handle_hunger(self, entities, sense_sq, terrain):
         self.current_action = Action.HUNGER
-        best_food = None
-        min_distance_sq = sense_sq
-
-        for plant in food:
-            distance_sq = (plant.x - self.x) ** 2 + (plant.y - self.y) ** 2
-            if distance_sq < min_distance_sq:
-                min_distance_sq = distance_sq
-                best_food = plant
+        best_food, min_distance_sq = self.get_closest_target(
+            entities, sense_sq,
+            lambda e: e.is_plant and e.alive
+        )
 
         if not best_food:
             self.wander(terrain)
@@ -487,32 +520,6 @@ class Prey(Agent):
             return
 
         self.move_towards(best_food.x, best_food.y, self.speed, terrain)
-
-    def act(self, terrain, spatial_grid, new_agents, mutation_probability, mutation_strength):
-        if not self.alive: return
-
-        entities = spatial_grid.get_nearby(self.x, self.y, self.sense)
-        sense_sq = self.sense * self.sense
-
-        predators, potential_mates, food = self._categorize_visible_entities(entities)
-        if self._flee_if_needed(predators, sense_sq, terrain):
-            return
-
-        priority = self.get_priority()
-        if priority is Priority.REPRODUCTION:
-            self._handle_reproduction(potential_mates, sense_sq, new_agents, mutation_probability, mutation_strength, terrain)
-            return
-
-        if priority is Priority.THIRST:
-            self._handle_thirst(terrain)
-            return
-
-        if priority is Priority.HUNGER:
-            self._handle_hunger(food, sense_sq, terrain)
-            return
-
-        self.current_action = Action.WANDER
-        self.wander(terrain)
 
 class Predator(Agent):
     # Predator tuning constants.
@@ -547,81 +554,19 @@ class Predator(Agent):
             return Priority.THIRST
         return Priority.WANDER
 
-    def _handle_reproduction(self, entities, sense_sq, new_agents, mutation_probability, mutation_strength, terrain):
-        self.current_action = Action.MATE
-        best_partner = None
-        min_distance_sq = float('inf')
-
-        for entity in entities:
-            if entity.entity_type is not EntityType.PREDATOR or not entity.alive or entity == self or entity.sex == self.sex:
-                continue
-            if abs(entity.x - self.x) > self.sense or abs(entity.y - self.y) > self.sense:
-                continue
-            if entity.get_priority() is not Priority.REPRODUCTION:
-                continue
-
-            distance_sq = (entity.x - self.x) ** 2 + (entity.y - self.y) ** 2
-            if distance_sq < sense_sq and distance_sq < min_distance_sq:
-                min_distance_sq = distance_sq
-                best_partner = entity
-
-        if not best_partner:
-            self.wander(terrain)
-            return
-
-        can_reproduce_now = self.is_in_interaction_range(best_partner, min_distance_sq, REPRODUCTION_DISTANCE_PADDING)
-        if can_reproduce_now:
-            self.hunger += self.REPRO_COST_HUNGER
-            self.thirst += self.REPRO_COST_THIRST
-            self.reproductive_urge = self.REPRO_COOLDOWN
-
-            best_partner.hunger += best_partner.REPRO_COST_HUNGER
-            best_partner.thirst += best_partner.REPRO_COST_THIRST
-            best_partner.reproductive_urge = best_partner.REPRO_COOLDOWN
-
-            new_agents.append(self.mix_genes(best_partner, mutation_probability, mutation_strength))
-            return
-
-        self.move_towards(best_partner.x, best_partner.y, self.speed, terrain)
-
-    def _handle_thirst(self, terrain):
-        self.current_action = Action.THIRST
-        water_handled, did_drink = self.try_drink_from_nearest_water(terrain, self.sense)
-        if did_drink:
-            self.current_action = Action.DRINK
-            return
-        if not water_handled:
-            self.wander(terrain)
-
-    def _select_prey_target(self, entities, sense_sq):
-        best_prey = None
-        best_score = -float('inf')
-        min_distance_sq = float('inf')
-
-        for entity in entities:
-            if entity.entity_type is not EntityType.PREY or not entity.alive:
-                continue
-
-            dx, dy = entity.x - self.x, entity.y - self.y
-            if abs(dx) > self.sense or abs(dy) > self.sense:
-                continue
-
-            distance_sq = dx * dx + dy * dy
-            if distance_sq >= sense_sq:
-                continue
-
-            distance = math.sqrt(distance_sq)
-            score = (entity.size * 10) - distance
-            if score > best_score:
-                best_score = score
-                best_prey = entity
-                min_distance_sq = distance_sq
-
-        return best_prey, min_distance_sq
-
-    def _handle_hunt(self, entities, sense_sq, terrain):
+    def _handle_hunger(self, entities, sense_sq, terrain):
         self.current_action = Action.HUNT
-        best_prey, min_distance_sq = self._select_prey_target(entities, sense_sq)
+
+        def score_func(entity, distance_sq):
+            distance = math.sqrt(distance_sq)
+            return (entity.size * 10) - distance
+
+        best_prey, min_distance_sq = self.get_closest_target(
+            entities, sense_sq,
+            lambda e: e.entity_type is EntityType.PREY and e.alive,
+            score_func
+        )
+
         if not best_prey:
             self.current_action = Action.HUNGER
             self.wander(terrain)
@@ -636,27 +581,6 @@ class Predator(Agent):
 
         self.move_towards(best_prey.x, best_prey.y, self.speed * PREDATOR_CHASE_SPEED_MULTIPLIER, terrain)
 
-    def act(self, terrain, spatial_grid, new_agents, mutation_probability, mutation_strength):
-        if not self.alive: return
-        priority = self.get_priority()
-
-        entities = spatial_grid.get_nearby(self.x, self.y, self.sense)
-        sense_sq = self.sense * self.sense
-
-        if priority is Priority.REPRODUCTION:
-            self._handle_reproduction(entities, sense_sq, new_agents, mutation_probability, mutation_strength, terrain)
-            return
-
-        if priority is Priority.THIRST:
-            self._handle_thirst(terrain)
-            return
-
-        if priority is Priority.HUNGER:
-            self._handle_hunt(entities, sense_sq, terrain)
-            return
-
-        self.current_action = Action.WANDER
-        self.wander(terrain)
 
 class Clover(Agent):
     # Plant tuning constants.
@@ -671,7 +595,7 @@ class Clover(Agent):
     def __init__(self, x: float, y: float, terrain):
         super().__init__(x, y, speed=0.0, size=0.1, sense=150.0)
         self.color = COLOR_AGENT_FOOD
-        self.max_age = random.randint(800, 1500)
+        self.max_age = random.randint(1000, 2000)
         self.current_action = Action.GROW
 
         self.reproductive_urge = random.uniform(0, 50)
@@ -708,21 +632,35 @@ class Clover(Agent):
             surplus = self.moisture_supply - self.BASE_THIRST_RATE
             self.reproductive_urge += self.BASE_REPRO_RATE * (0.5 + 2.0 * health_factor + surplus)
 
-    def act(self, terrain, spatial_grid, new_agents, max_food_capacity):
-        if not self.alive: return
-
+    def _count_neighbors(self, spatial_grid):
         nearby_entities = spatial_grid.get_nearby(self.x, self.y, 30)
-
         sosedi_count = 0
         for e in nearby_entities:
             if e.is_plant and e.alive and e != self:
                 if (e.x - self.x) ** 2 + (e.y - self.y) ** 2 < 900:
                     sosedi_count += 1
+        return sosedi_count
 
+    def _attempt_spawn(self, terrain, new_agents):
+        for _ in range(5):
+            angle = random.uniform(0, 2 * math.pi)
+            dist = random.uniform(20, 50)
+            nx = self.x + math.cos(angle) * dist
+            ny = self.y + math.sin(angle) * dist
+
+            if 0 < nx < SIM_WIDTH and 0 < ny < SIM_HEIGHT:
+                if terrain.get_terrain_props_at(nx, ny)["walkable"]:
+                    new_clover = Clover(nx, ny, terrain)
+                    new_agents.append(new_clover)
+                    break
+
+    def act(self, terrain, spatial_grid, new_agents, max_food_capacity):
+        if not self.alive: return
+
+        sosedi_count = self._count_neighbors(spatial_grid)
         fertility_modifier = 80.0 / max(1.0, float(max_food_capacity))
 
         crowding_penalty = (sosedi_count * 0.15) * fertility_modifier
-
         self._update_plant_needs(1.0 + crowding_penalty)
 
         if not self.alive: return
@@ -731,18 +669,7 @@ class Clover(Agent):
             if self.thirst < 5.0 and sosedi_count < 8:
                 self.reproductive_urge = 0
                 self.thirst += 40
-
-                for _ in range(5):
-                    angle = random.uniform(0, 2 * math.pi)
-                    dist = random.uniform(20, 50)
-                    nx = self.x + math.cos(angle) * dist
-                    ny = self.y + math.sin(angle) * dist
-                    
-                    if 0 < nx < SIM_WIDTH and 0 < ny < SIM_HEIGHT:
-                        if terrain.get_terrain_props_at(nx, ny)["walkable"]:
-                            new_clover = Clover(nx, ny, terrain)
-                            new_agents.append(new_clover)
-                            break
+                self._attempt_spawn(terrain, new_agents)
             if self.thirst >= 5.0 or sosedi_count >= 8:
                 self.reproductive_urge = 100
 
@@ -753,14 +680,14 @@ class Clover(Agent):
 
 class SimThread(threading.Thread):
     def __init__(self, data_queue: queue.Queue, n_prey: int, n_pred: int, n_food: int, init_params: dict,
-                 simulation_delay_entry: tk.Entry, terrain_file: str = None):
+                 simulation_delay: float, terrain_file: str = None):
         super().__init__(daemon=True)
         self.q = data_queue
         self.n_prey = n_prey
         self.n_pred = n_pred
         self.n_food = n_food
         self.init_params = init_params
-        self._simulation_delay_entry = simulation_delay_entry
+        self.simulation_delay = simulation_delay
 
         self._running = True
         self._paused = threading.Event()
@@ -796,11 +723,8 @@ class SimThread(threading.Thread):
             time.sleep(self._get_speed())
 
     def _get_speed(self) -> float:
-        try:
-            val = float(self._simulation_delay_entry.get())
-            if val > 0: return val
-        except:
-            pass
+        if self.simulation_delay > 0:
+            return self.simulation_delay
         return float(DEFAULT_SIMULATION_DELAY_SECONDS)
 
     def _spawn_agent_safe(self, AgentClass, *args, **kwargs):
@@ -1056,13 +980,18 @@ class App(tk.Tk):
         terrain_file = getattr(self, 'selected_terrain_name', None)
         selected_terrain = terrain_file.get() if terrain_file else "Random Generate"
 
+        try:
+            sim_delay = float(self.entry_simulation_delay.get())
+        except ValueError:
+            sim_delay = float(DEFAULT_SIMULATION_DELAY_SECONDS)
+
         self.sim = SimThread(
             data_queue=self.data_queue,
             n_prey=n_prey,
             n_pred=n_pred,
             n_food=n_food,
             init_params=init_params,
-            simulation_delay_entry=self.entry_simulation_delay,
+            simulation_delay=sim_delay,
             terrain_file=selected_terrain
         )
         self.sim.start()
@@ -1103,7 +1032,7 @@ class App(tk.Tk):
 
         latest = None
         try:
-            while True: 
+            while True:
                 latest = self.data_queue.get_nowait()
         except queue.Empty:
             pass
@@ -1118,6 +1047,17 @@ class App(tk.Tk):
             if refresh_ms < 10: refresh_ms = 10
         except ValueError:
             refresh_ms = int(DEFAULT_UI_REFRESH_INTERVAL_MS)
+
+        try:
+            raw_delay = self.entry_simulation_delay.get().strip()
+            sim_delay = float(raw_delay) if raw_delay else float(DEFAULT_SIMULATION_DELAY_SECONDS)
+            if sim_delay <= 0:
+                sim_delay = float(DEFAULT_SIMULATION_DELAY_SECONDS)
+        except ValueError:
+            sim_delay = float(DEFAULT_SIMULATION_DELAY_SECONDS)
+
+        if self.sim is not None:
+            self.sim.simulation_delay = sim_delay
 
         self.after(refresh_ms, self._poll_queue)
 
@@ -1139,17 +1079,17 @@ class App(tk.Tk):
                             wx2 = x * terrain.cell_size
                             wy2 = (y + 1) * terrain.cell_size
                             self.sim_canvas.create_rectangle(wx1, wy1, wx2, wy2, fill=col, outline="", tags="terrain")
-                            
+
                             start_x = x
                             current_ctype = terrain.grid[y][x]
-                            
+
                     col = terrain.TERRAIN_PROPS[current_ctype]["color"]
                     wx1 = start_x * terrain.cell_size
                     wy1 = y * terrain.cell_size
                     wx2 = terrain.cols * terrain.cell_size
                     wy2 = (y + 1) * terrain.cell_size
                     self.sim_canvas.create_rectangle(wx1, wy1, wx2, wy2, fill=col, outline="", tags="terrain")
-                                                         
+
             self._is_terrain_drawn = True
 
         # Panning the entire canvas
@@ -1162,7 +1102,7 @@ class App(tk.Tk):
         for (ag_id, ax, ay, ar, col, alive, sense, action,
              hunger, thirst, entity_type_name) in payload['agents']:
             if not alive: continue
-            
+
             current_ids.add(ag_id)
             cx, cy = ax, ay
 
@@ -1191,9 +1131,9 @@ class App(tk.Tk):
                     self.sim_canvas.itemconfig(g['tp_fg'], state=tk.NORMAL)
                     self.sim_canvas.itemconfig(g['text'], state=tk.NORMAL)
                     g['debug_visible'] = True
-                    
+
                 self.sim_canvas.coords(g['sight'], cx - sense, cy - sense, cx + sense, cy + sense)
-                
+
                 bar_w = 16
                 hp = min(1.0, hunger / 100.0)
                 self.sim_canvas.coords(g['hp_bg'], cx - bar_w / 2, cy - ar - 14, cx + bar_w / 2, cy - ar - 11)
@@ -1223,7 +1163,7 @@ class App(tk.Tk):
                     if key != 'debug_visible':
                         self.sim_canvas.delete(item)
                 dead_ids.append(ag_id)
-        
+
         for dead in dead_ids:
             del self._agent_canvas_items[dead]
 

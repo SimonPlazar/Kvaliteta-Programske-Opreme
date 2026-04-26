@@ -150,3 +150,16 @@
 - Kept concise comments only where behavior/math is non-obvious.
 - Standardized touched comments to English.
 
+## SRP Agent Flow Unification (Step 6)
+
+### Scope
+- Updated: `main-copy.py`
+
+### What was changed
+- **Lifted Base Flow:** Unified the `Agent` decision making logic with a skeleton flow implemented on the base class level. The new `act()` runs in an enforced strict pattern: `sense -> special interrupt -> priority dispatch -> fallback wander`.
+- **Inherited Behaviours:** Instead of recreating full logic blocks, sub-agents (like `Prey` and `Predator`) now override small abstract methods such as `_special_interrupt()` to define unique, agent-specific edge cases (e.g., escaping execution context when fleeing from a predator).
+- **Abstracted Common Helpers:** Common iterations like "find closest mate in sight" or "try to find nearest water" were extracted out of the subclasses. Instead, we injected `get_closest_target` handling filter loops functionally, eliminating massive repetition.
+
+### Policy Applied
+- Implement broad class inheritance safely if duplicate routines persist across sub-categories. Base routines should be flexible templates parameterized using abstract method dispatch.
+
