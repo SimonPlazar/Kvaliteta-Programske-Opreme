@@ -9,7 +9,7 @@ import glob
 import os
 import json
 from enum import Enum
-from terrain_builder_copy import generate_terrain_grid
+from terrain_builder import generate_terrain_grid
 
 # ── colours ──────────────────────────────────────────────────────────────────
 COLOR_AGENT = "#3a7bd5"
